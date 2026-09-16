@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-BD3D 转换器（Qt 版）
+BD3D 3D 视频转换器
 把 3D 蓝光原盘（左右眼双流）转成 SBS/TAB 立体视频（HEVC，AMD GPU 硬件编码）。
 
 源文件结构：BDMV\\STREAM 下
-  00000.m2ts = 左眼（AVC 基础视图，含音轨）
+  00000.m2ts = 左眼（AVC 基础视图）
   00001.m2ts = 右眼（MVC 依赖视图）
 
 流程：tsMuxeR 分别解出两路 ES -> FRIMSource 解码 MVC -> AviSynth 合成布局 -> ffmpeg 编码
-界面：Qt (PySide6)，框架级双缓冲，窗口缩放即时无闪烁
+界面：原生 tkinter/ttk（无 Canvas 控件），窗口缩放流畅
 
 用法（GUI）: python bd3d2sbs.py
 用法（CLI）: python bd3d2sbs.py --cli --left "00000.m2ts" --right "00001.m2ts" --out "x.mkv"
@@ -24,16 +24,67 @@ import time
 import shutil
 import threading
 import subprocess
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
 
-from PySide6.QtCore import Qt, QObject, Signal, QTimer
-from PySide6.QtGui import QIcon, QFont
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QProgressBar, QLabel, QComboBox, QCheckBox, QPlainTextEdit, QFrame,
-    QFileDialog, QMessageBox)
+try:
+    import pywinstyles  # Win11 标题栏深色（MIT 开源）
+except Exception:
+    pywinstyles = None
+try:
+    import sv_ttk  # Win11 Fluent 风格控件主题（Sun Valley, MIT 开源）
+except Exception:
+    sv_ttk = None
 
 APP_TITLE = "BD3D 转换器"
-APP_VERSION = "v1.7"
+APP_VERSION = "v1.5"
+
+# ---- 界面配色（深色专业风格）----
+C_BG = "#17181c"
+C_CARD = "#202127"
+C_BORDER = "#2e3038"
+C_INPUT = "#2a2c34"
+C_TEXT = "#e8e9ed"
+C_DIM = "#9a9ca8"
+C_FAINT = "#6b6d78"
+C_ACCENT = "#3574f0"
+C_ACCENT_H = "#2b5fd0"
+C_BTN2 = "#33363e"
+C_BTN2_H = "#3d4149"
+C_LOG_BG = "#121317"
+
+F_TITLE = ("Microsoft YaHei UI", 15, "bold")
+F_CARDT = ("Microsoft YaHei UI", 11, "bold")
+F_LABEL = ("Microsoft YaHei UI", 11)
+F_BTN = ("Microsoft YaHei UI", 11, "bold")
+F_BIG = ("Microsoft YaHei UI", 22, "bold")
+F_SMALL = ("Microsoft YaHei UI", 10)
+F_MONO = ("Microsoft YaHei UI", 10)
+F_ARROW = ("Segoe UI Symbol", 11)
+
+
+def apply_font_scale(root):
+    """按屏幕 DPI 以像素为单位重算全局字体。
+    负值字号 = 像素单位，避免 tk scaling 的非整数缩放导致的渲染发虚/粗细不均、
+    以及大窗口下的布局异常。所有字体统一用微软雅黑（中英文渲染一致）。"""
+    global F_TITLE, F_CARDT, F_LABEL, F_BTN, F_BIG, F_SMALL, F_MONO, F_ARROW
+    try:
+        k = root.winfo_fpixels("1i") / 96.0
+    except Exception:
+        k = 1.0
+
+    def px(v):
+        return max(9, int(round(v * k)))
+
+    ui = "Microsoft YaHei UI"
+    F_TITLE = (ui, -px(20), "bold")
+    F_CARDT = (ui, -px(14), "bold")
+    F_LABEL = (ui, -px(14))
+    F_BTN = (ui, -px(14), "bold")
+    F_BIG = (ui, -px(30), "bold")
+    F_SMALL = (ui, -px(13))
+    F_MONO = (ui, -px(14))
+    F_ARROW = ("Segoe UI Symbol", -px(14))
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -80,6 +131,7 @@ AUDIO_WEIGHT = 4.0
 MUX_WEIGHT = 5.0
 
 if getattr(sys, "frozen", False):
+    # PyInstaller: bin 在 exe 旁边；打包数据（app.ico）在 _MEIPASS（_internal）
     _EXE_DIR = os.path.dirname(sys.executable)
     _BIN_BASE = _EXE_DIR
     _CFG_BASE = _EXE_DIR
@@ -95,70 +147,20 @@ ICON_PATH = os.path.join(_ICO_BASE, "app.ico")
 CONFIG_PATH = os.path.join(_CFG_BASE, "config.json")
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
-QSS = """
-QWidget { background: #17181c; color: #e8e9ed;
-          font-family: "Microsoft YaHei UI"; font-size: 10.5pt; }
-QFrame#card { background: #202127; border: 1px solid #2e3038; border-radius: 8px; }
-QLabel { background: transparent; }
-QLineEdit { background: #2a2c34; border: 1px solid #2e3038; border-radius: 6px;
-            padding: 5px 8px; color: #e8e9ed; }
-QLineEdit:focus { border: 1px solid #3574f0; }
-QLineEdit:disabled { color: #6b6d78; }
-QComboBox { background: #2a2c34; border: 1px solid #2e3038; border-radius: 6px;
-            padding: 4px 8px; color: #e8e9ed; }
-QComboBox::drop-down { border: none; width: 22px; }
-QComboBox QAbstractItemView { background: #202127; border: 1px solid #2e3038;
-            selection-background-color: #3574f0; outline: none; color: #e8e9ed; }
-QPushButton { background: #33363e; border: 1px solid #2e3038; border-radius: 6px;
-              padding: 6px 14px; color: #e8e9ed; }
-QPushButton:hover { background: #3d4149; }
-QPushButton:disabled { color: #6b6d78; }
-QPushButton#accent { background: #3574f0; border: 1px solid #3574f0;
-                     color: #ffffff; font-weight: 600; }
-QPushButton#accent:hover { background: #2b5fd0; }
-QPushButton#accent:disabled { background: #2b3f66; border-color: #2b3f66;
-                              color: #9aa5b8; }
-QProgressBar { background: #2e3038; border: none; border-radius: 4px; }
-QProgressBar::chunk { background: #3574f0; border-radius: 4px; }
-QCheckBox { color: #c9cbd3; spacing: 8px; }
-QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px;
-                       border: 1px solid #3d4149; background: #2a2c34; }
-QCheckBox::indicator:checked { background: #3574f0; border-color: #3574f0; }
-QCheckBox::indicator:hover { border-color: #3574f0; }
-QPlainTextEdit { background: #121317; border: 1px solid #2e3038; border-radius: 6px;
-                 color: #c8cad2; padding: 6px; }
-QScrollBar:vertical { background: #17181c; width: 10px; margin: 0; }
-QScrollBar::handle:vertical { background: #3a3d46; border-radius: 5px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #4a4e58; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
-"""
 
-
-class Cancelled(Exception):
-    pass
-
-
-def popen_hidden(cmd):
-    return subprocess.Popen(
-        cmd, creationflags=CREATE_NO_WINDOW,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        encoding="utf-8", errors="replace", bufsize=1)
-
-
-def run_hidden(cmd):
-    return subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", creationflags=CREATE_NO_WINDOW)
-
-
-def fmt_time(seconds):
-    seconds = int(max(seconds, 0))
-    if seconds >= 3600:
-        return "%d 小时 %d 分" % (seconds // 3600, (seconds % 3600) // 60)
-    if seconds >= 60:
-        return "%d 分 %d 秒" % (seconds // 60, seconds % 60)
-    return "%d 秒" % seconds
+def enable_dpi_awareness():
+    """启用 DPI 感知（避免窗口最大化/缩放后字体发糊）"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 
 def to_short_path(path):
@@ -191,7 +193,9 @@ def safe_plugin_path(dll_path):
     sp = to_short_path(dll_path)
     if is_ascii(sp):
         return sp
+    # 复制插件到 ASCII 临时目录
     import tempfile
+    import shutil
     for base in (os.environ.get("TEMP", ""), tempfile.gettempdir(),
                  os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Temp")):
         if not base or not is_ascii(base):
@@ -223,6 +227,32 @@ def ascii_workdir(preferred, name):
         if is_ascii(alt):
             return alt
     return preferred
+
+
+class Cancelled(Exception):
+    pass
+
+
+def popen_hidden(cmd):
+    return subprocess.Popen(
+        cmd, creationflags=CREATE_NO_WINDOW,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", bufsize=1)
+
+
+def run_hidden(cmd):
+    return subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", creationflags=CREATE_NO_WINDOW)
+
+
+def fmt_time(seconds):
+    seconds = int(max(seconds, 0))
+    if seconds >= 3600:
+        return "%d 小时 %d 分" % (seconds // 3600, (seconds % 3600) // 60)
+    if seconds >= 60:
+        return "%d 分 %d 秒" % (seconds // 60, seconds % 60)
+    return "%d 秒" % seconds
 
 
 def probe_stream_pid(path, kind):
@@ -413,6 +443,7 @@ class ConvertJob(threading.Thread):
                 raise RuntimeError("解流输出文件缺失，请检查源文件")
             cand_left = os.path.join(self.workdir, l264[0])
             cand_right = os.path.join(self.workdir, mvc[0])
+        # 重命名为固定名，便于跳过解流复用
         left_es = os.path.join(self.workdir, "left.264")
         right_es = os.path.join(self.workdir, "right.mvc")
         for src, dst in ((cand_left, left_es), (cand_right, right_es)):
@@ -671,326 +702,333 @@ def concat_files(files, out_file, on_log=None, on_done=None, on_error=None):
     threading.Thread(target=work, daemon=True).start()
 
 
-# ==================== UI ====================
-class Bridge(QObject):
-    """线程 -> UI 的信号桥"""
-    log = Signal(str)
-    progress = Signal(float, str)
-    done = Signal(str)
-    error = Signal(str)
+# ==================== GUI ====================
+class Section(tk.Frame):
+    """可折叠设置区（原生 tk 控件，缩放流畅）"""
 
-
-class Section(QFrame):
-    """可折叠设置区（Qt 版）"""
-
-    def __init__(self, title, parent=None):
-        super().__init__(parent)
-        self.setObjectName("card")
-        self.setCursor(Qt.PointingHandCursor)
+    def __init__(self, parent, title):
+        super().__init__(parent, bg=C_CARD, highlightthickness=1,
+                         highlightbackground=C_BORDER, highlightcolor=C_BORDER)
         self._expanded = False
         self._summary = ""
+        self.head = tk.Frame(self, bg=C_CARD, cursor="hand2", height=34)
+        self.head.pack(fill="x")
+        self.head.pack_propagate(False)
+        self.arrow = tk.Label(self.head, text="›", bg=C_CARD, fg=C_DIM,
+                              font=F_ARROW, width=2)
+        self.arrow.pack(side="left", padx=(10, 0))
+        self.title_lbl = tk.Label(self.head, text=title, bg=C_CARD, fg=C_TEXT,
+                                  font=F_CARDT)
+        self.title_lbl.pack(side="left")
+        self.sum_lbl = tk.Label(self.head, text="", bg=C_CARD, fg=C_FAINT,
+                                font=F_SMALL)
+        self.sum_lbl.pack(side="right", padx=14)
+        for w in (self.head, self.arrow, self.title_lbl, self.sum_lbl):
+            w.bind("<Button-1>", self.toggle)
+            w.bind("<Enter>", lambda e: self._hover(True))
+            w.bind("<Leave>", lambda e: self._hover(False))
+        self.body = tk.Frame(self, bg=C_CARD)
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 6, 14, 8)
-        lay.setSpacing(8)
+    def _hover(self, on):
+        col = C_ACCENT if on else C_TEXT
+        self.title_lbl.configure(fg=col)
 
-        self._head = QWidget()
-        self._head.setCursor(Qt.PointingHandCursor)
-        h = QHBoxLayout(self._head)
-        h.setContentsMargins(0, 3, 0, 3)
-        self._arrow = QLabel("›")
-        self._arrow.setFixedWidth(14)
-        self._arrow.setStyleSheet("color:#9a9ca8;")
-        self._title = QLabel(title)
-        self._title.setStyleSheet("font-weight:600;")
-        self._sum = QLabel("")
-        self._sum.setStyleSheet("color:#6b6d78;")
-        h.addWidget(self._arrow)
-        h.addWidget(self._title)
-        h.addStretch(1)
-        h.addWidget(self._sum)
-        lay.addWidget(self._head)
-
-        self.body = QWidget()
-        self.body_outer = lay
-        self.body_layout = QVBoxLayout(self.body)
-        self.body_layout.setContentsMargins(0, 0, 0, 0)
-        self.body_layout.setSpacing(6)
-        self.body.setVisible(False)
-        lay.addWidget(self.body)
-
-        self._head.mousePressEvent = self._on_click
-
-    def _on_click(self, event):
-        self.toggle()
-        event.accept()
-
-    def toggle(self):
+    def toggle(self, _=None):
         self._expanded = not self._expanded
-        self._arrow.setText("⌄" if self._expanded else "›")
-        self.body.setVisible(self._expanded)
-        self._sum.setText("" if self._expanded else self._summary)
+        if self._expanded:
+            self.arrow.configure(text="⌄")
+            self.body.pack(fill="x", padx=14, pady=(0, 12))
+            self.sum_lbl.configure(text="")
+        else:
+            self.arrow.configure(text="›")
+            self.body.pack_forget()
+            self.sum_lbl.configure(text=self._summary)
 
     def set_summary(self, text):
         self._summary = text
         if not self._expanded:
-            self._sum.setText(text)
+            self.sum_lbl.configure(text=text)
 
 
-class MainWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.cfg = self._load_cfg()
+class App:
+    def __init__(self, root: tk.Tk):
+        self.root = root
         self.job = None
+        self.cfg = self._load_cfg()
         self.audio_tracks = []
-        self.bridge = Bridge()
-        self.bridge.log.connect(self._log)
-        self.bridge.progress.connect(self._progress)
-        self.bridge.done.connect(self._done)
-        self.bridge.error.connect(self._fail)
 
-        self.setWindowTitle(APP_TITLE)
-        self.resize(900, 800)
-        self.setMinimumSize(800, 640)
+        root.title(APP_TITLE)
+        root.geometry("880x780")
+        root.minsize(800, 640)
+        root.configure(bg=C_BG)
         try:
-            self.setWindowIcon(QIcon(ICON_PATH))
+            root.iconbitmap(ICON_PATH)
         except Exception:
             pass
+        self._set_dark_titlebar()
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(8)
+        self._init_style()
+
+        root.grid_columnconfigure(0, weight=1)
+        root.grid_rowconfigure(8, weight=1)
 
         # ---------- 顶栏 ----------
-        top = QHBoxLayout()
-        t = QLabel(APP_TITLE)
-        t.setStyleSheet("font-size:16pt; font-weight:700;")
-        top.addWidget(t)
-        v = QLabel(APP_VERSION)
-        v.setStyleSheet("color:#6b6d78;")
-        top.addWidget(v)
-        top.addStretch(1)
-        top.addWidget(QLabel("3D 蓝光双流 → SBS / TAB · GPU 硬件加速"))
-        root.addLayout(top)
+        top = tk.Frame(root, bg=C_BG)
+        top.grid(row=0, column=0, sticky="ew", padx=20, pady=(14, 6))
+        tk.Label(top, text=APP_TITLE, bg=C_BG, fg=C_TEXT, font=F_TITLE
+                 ).pack(side="left")
+        tk.Label(top, text=APP_VERSION, bg=C_BG, fg=C_FAINT, font=F_SMALL
+                 ).pack(side="left", padx=(7, 0), pady=(4, 0))
+        tk.Label(top, text="3D 蓝光双流 → SBS / TAB · GPU 硬件加速",
+                 bg=C_BG, fg=C_DIM, font=F_SMALL).pack(side="right", pady=(4, 0))
 
         # ---------- 源与输出 ----------
-        card = QFrame()
-        card.setObjectName("card")
-        cv = QVBoxLayout(card)
-        cv.setContentsMargins(14, 10, 14, 12)
-        cv.setSpacing(6)
-        self.le_left = QLineEdit(self.cfg.get("left", ""))
-        self.le_right = QLineEdit(self.cfg.get("right", ""))
-        self.le_out = QLineEdit(self.cfg.get("out", ""))
-        self._file_row(cv, "左眼文件", self.le_left, self.pick_left,
+        body = self._card(root, None)
+        self.var_left = tk.StringVar(value=self.cfg.get("left", ""))
+        self._file_row(body, "左眼文件", self.var_left, self.pick_left,
                        "BDMV\\STREAM 内的主视频流（如 00000.m2ts）")
-        self._file_row(cv, "右眼文件", self.le_right, self.pick_right,
+        self.var_right = tk.StringVar(value=self.cfg.get("right", ""))
+        self._file_row(body, "右眼文件", self.var_right, self.pick_right,
                        "同目录的另一条流（如 00001.m2ts，选左眼后自动配对）")
-        self._file_row(cv, "输出到", self.le_out, self.pick_out,
+        self.var_out = tk.StringVar(value=self.cfg.get("out", ""))
+        self._file_row(body, "输出到", self.var_out, self.pick_out,
                        "建议输出磁盘剩余空间 ≥ 45 GB")
-        root.addWidget(card)
 
         # ---------- 输出格式 ----------
-        self.sec_fmt = Section("输出格式")
-        r = QHBoxLayout()
-        r.addWidget(QLabel("3D 布局"))
-        self.cmb_layout = QComboBox()
-        self.cmb_layout.addItems([x[0] for x in LAYOUTS])
-        self._set_combo(self.cmb_layout, self.cfg.get("layout", LAYOUTS[0][0]))
-        r.addWidget(self.cmb_layout, 2)
-        r.addWidget(QLabel("容器"))
-        self.cmb_container = QComboBox()
-        self.cmb_container.addItems([x[0] for x in CONTAINERS])
-        self._set_combo(self.cmb_container, self.cfg.get("container", CONTAINERS[0][0]))
-        r.addWidget(self.cmb_container, 2)
-        r.addStretch(1)
-        self.sec_fmt.body_layout.addLayout(r)
-        root.addWidget(self.sec_fmt)
+        self.sec_fmt = Section(root, "输出格式")
+        self.sec_fmt.grid(row=2, column=0, sticky="ew", padx=20, pady=3)
+        r = tk.Frame(self.sec_fmt.body, bg=C_CARD)
+        r.pack(fill="x", pady=2)
+        tk.Label(r, text="3D 布局", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=9, anchor="w").pack(side="left")
+        self.var_layout = tk.StringVar(value=self.cfg.get("layout", LAYOUTS[0][0]))
+        self._combo(r, self.var_layout, [x[0] for x in LAYOUTS], 26
+                    ).pack(side="left", padx=(6, 18))
+        tk.Label(r, text="容器", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=5, anchor="w").pack(side="left")
+        self.var_container = tk.StringVar(value=self.cfg.get("container", CONTAINERS[0][0]))
+        self._combo(r, self.var_container, [x[0] for x in CONTAINERS], 22,
+                    self._on_container_change).pack(side="left", padx=6)
 
         # ---------- 编码设置 ----------
-        self.sec_enc = Section("编码设置")
-        r = QHBoxLayout()
-        r.addWidget(QLabel("编码器"))
-        self.cmb_encoder = QComboBox()
-        self.cmb_encoder.addItems([x[0] for x in ENCODERS])
-        self._set_combo(self.cmb_encoder, self.cfg.get("encoder", ENCODERS[0][0]))
-        r.addWidget(self.cmb_encoder, 2)
-        r.addWidget(QLabel("速度"))
-        self.cmb_speed = QComboBox()
-        self.cmb_speed.addItems([x[0] for x in SPEEDS])
-        self._set_combo(self.cmb_speed, self.cfg.get("speed", SPEEDS[0][0]))
-        r.addWidget(self.cmb_speed, 1)
-        r.addStretch(1)
-        self.sec_enc.body_layout.addLayout(r)
-        r = QHBoxLayout()
-        r.addWidget(QLabel("质量模式"))
-        self.cmb_rc = QComboBox()
-        self.cmb_rc.addItems([x[0] for x in RC_MODES])
-        self._set_combo(self.cmb_rc, self.cfg.get("rc", RC_MODES[0][0]))
-        r.addWidget(self.cmb_rc, 1)
-        r.addWidget(QLabel("质量"))
-        self.cmb_qp = QComboBox()
-        self.cmb_qp.addItems([x[0] for x in QP_LEVELS])
-        self._set_combo(self.cmb_qp, self.cfg.get("qp", QP_LEVELS[0][0]))
-        r.addWidget(self.cmb_qp, 2)
-        r.addWidget(QLabel("码率(M)"))
-        self.le_bitrate = QLineEdit(str(self.cfg.get("bitrate", 20)))
-        self.le_bitrate.setFixedWidth(60)
-        r.addWidget(self.le_bitrate)
-        r.addStretch(1)
-        self.sec_enc.body_layout.addLayout(r)
-        root.addWidget(self.sec_enc)
+        self.sec_enc = Section(root, "编码设置")
+        self.sec_enc.grid(row=3, column=0, sticky="ew", padx=20, pady=3)
+        r = tk.Frame(self.sec_enc.body, bg=C_CARD)
+        r.pack(fill="x", pady=2)
+        tk.Label(r, text="编码器", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=9, anchor="w").pack(side="left")
+        self.var_encoder = tk.StringVar(value=self.cfg.get("encoder", ENCODERS[0][0]))
+        self._combo(r, self.var_encoder, [x[0] for x in ENCODERS], 26
+                    ).pack(side="left", padx=(6, 18))
+        tk.Label(r, text="速度", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=5, anchor="w").pack(side="left")
+        self.var_speed = tk.StringVar(value=self.cfg.get("speed", SPEEDS[0][0]))
+        self._combo(r, self.var_speed, [x[0] for x in SPEEDS], 12
+                    ).pack(side="left", padx=6)
+        r = tk.Frame(self.sec_enc.body, bg=C_CARD)
+        r.pack(fill="x", pady=2)
+        tk.Label(r, text="质量模式", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=9, anchor="w").pack(side="left")
+        self.var_rc = tk.StringVar(value=self.cfg.get("rc", RC_MODES[0][0]))
+        self._combo(r, self.var_rc, [x[0] for x in RC_MODES], 16,
+                    self._on_rc_change).pack(side="left", padx=(6, 18))
+        tk.Label(r, text="质量", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=5, anchor="w").pack(side="left")
+        self.var_qp = tk.StringVar(value=self.cfg.get("qp", QP_LEVELS[0][0]))
+        self.cmb_qp = self._combo(r, self.var_qp, [x[0] for x in QP_LEVELS], 20)
+        self.cmb_qp.pack(side="left", padx=(6, 18))
+        tk.Label(r, text="码率(M)", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=7, anchor="w").pack(side="left")
+        self.var_bitrate = tk.StringVar(value=str(self.cfg.get("bitrate", 20)))
+        self.entry_bitrate = ttk.Entry(r, textvariable=self.var_bitrate, width=7,
+                                       font=F_LABEL)
+        self.entry_bitrate.pack(side="left", padx=6)
 
         # ---------- 音频 ----------
-        self.sec_aud = Section("音频")
-        r = QHBoxLayout()
-        r.addWidget(QLabel("主音轨"))
-        self.cmb_track = QComboBox()
-        self.cmb_track.addItem("自动（英语优先，最高声道）")
-        r.addWidget(self.cmb_track, 3)
-        r.addWidget(QLabel("音频输出"))
-        self.cmb_audio = QComboBox()
-        self.cmb_audio.addItems([x[0] for x in AUDIO_MODES])
-        self._set_combo(self.cmb_audio, self.cfg.get("audio", AUDIO_MODES[0][0]))
-        r.addWidget(self.cmb_audio, 2)
-        r.addStretch(1)
-        self.sec_aud.body_layout.addLayout(r)
-        root.addWidget(self.sec_aud)
+        self.sec_aud = Section(root, "音频")
+        self.sec_aud.grid(row=4, column=0, sticky="ew", padx=20, pady=3)
+        r = tk.Frame(self.sec_aud.body, bg=C_CARD)
+        r.pack(fill="x", pady=2)
+        tk.Label(r, text="主音轨", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=9, anchor="w").pack(side="left")
+        self.var_track = tk.StringVar(value="自动（英语优先，最高声道）")
+        self.cmb_track = self._combo(r, self.var_track,
+                                     ["自动（英语优先，最高声道）"], 34)
+        self.cmb_track.pack(side="left", padx=(6, 18))
+        tk.Label(r, text="音频输出", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=7, anchor="w").pack(side="left")
+        self.var_audio = tk.StringVar(value=self.cfg.get("audio", AUDIO_MODES[0][0]))
+        self._combo(r, self.var_audio, [x[0] for x in AUDIO_MODES], 24
+                    ).pack(side="left", padx=6)
 
         # ---------- 高级 ----------
-        self.sec_adv = Section("高级")
-        r = QHBoxLayout()
-        r.addWidget(QLabel("关键帧间隔"))
-        self.le_gop = QLineEdit(str(self.cfg.get("gop", 96)))
-        self.le_gop.setFixedWidth(60)
-        r.addWidget(self.le_gop)
-        self.chk_open = QCheckBox("完成后打开输出目录")
-        self.chk_open.setChecked(bool(self.cfg.get("open_after", True)))
-        r.addWidget(self.chk_open)
-        r.addWidget(QLabel("限制帧数（调试）"))
-        self.le_frames = QLineEdit("")
-        self.le_frames.setFixedWidth(80)
-        r.addWidget(self.le_frames)
-        r.addStretch(1)
-        self.sec_adv.body_layout.addLayout(r)
-        root.addWidget(self.sec_adv)
+        self.sec_adv = Section(root, "高级")
+        self.sec_adv.grid(row=5, column=0, sticky="ew", padx=20, pady=3)
+        r = tk.Frame(self.sec_adv.body, bg=C_CARD)
+        r.pack(fill="x", pady=2)
+        tk.Label(r, text="关键帧间隔", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=9, anchor="w").pack(side="left")
+        self.var_gop = tk.StringVar(value=str(self.cfg.get("gop", 96)))
+        ttk.Entry(r, textvariable=self.var_gop, width=7, font=F_LABEL
+                  ).pack(side="left", padx=(6, 18))
+        self.var_open = tk.BooleanVar(value=self.cfg.get("open_after", True))
+        ttk.Checkbutton(r, text="完成后打开输出目录", variable=self.var_open
+                        ).pack(side="left", padx=(0, 18))
+        tk.Label(r, text="限制帧数（调试）", bg=C_CARD, fg=C_DIM, font=F_LABEL
+                 ).pack(side="left")
+        self.var_frames = tk.StringVar(value="")
+        ttk.Entry(r, textvariable=self.var_frames, width=9, font=F_LABEL
+                  ).pack(side="left", padx=6)
 
         # ---------- 按钮 ----------
-        brow = QHBoxLayout()
-        self.btn_start = QPushButton("开始转换")
-        self.btn_start.setObjectName("accent")
-        self.btn_start.setFixedWidth(130)
-        self.btn_start.clicked.connect(self.start)
-        brow.addWidget(self.btn_start)
-        self.btn_cancel = QPushButton("取消")
-        self.btn_cancel.setFixedWidth(90)
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self.cancel)
-        brow.addWidget(self.btn_cancel)
-        brow.addStretch(1)
-        self.btn_concat = QPushButton("无损拼接（完整片）")
-        self.btn_concat.clicked.connect(self.concat)
-        brow.addWidget(self.btn_concat)
-        root.addLayout(brow)
+        btns = tk.Frame(root, bg=C_BG)
+        btns.grid(row=6, column=0, sticky="ew", padx=20, pady=(10, 4))
+        self.btn_start = ttk.Button(btns, text="开始转换", command=self.start,
+                                    width=13, style="Big.TButton")
+        self.btn_start.pack(side="left")
+        self.btn_cancel = ttk.Button(btns, text="取消", command=self.cancel,
+                                     width=9, state="disabled")
+        self.btn_cancel.pack(side="left", padx=10)
+        ttk.Button(btns, text="无损拼接（完整片）", command=self.concat,
+                   width=18).pack(side="right")
 
         # ---------- 进度 ----------
-        card = QFrame()
-        card.setObjectName("card")
-        cv = QVBoxLayout(card)
-        cv.setContentsMargins(14, 10, 14, 12)
-        cv.setSpacing(6)
-        r = QHBoxLayout()
-        self.lbl_pct = QLabel("0.0%")
-        self.lbl_pct.setStyleSheet("font-size:22pt; font-weight:700;")
-        r.addWidget(self.lbl_pct)
-        self.lbl_stage = QLabel("就绪")
-        self.lbl_stage.setStyleSheet("color:#9a9ca8;")
-        r.addWidget(self.lbl_stage)
-        r.addStretch(1)
-        cv.addLayout(r)
-        self.pb = QProgressBar()
-        self.pb.setRange(0, 1000)
-        self.pb.setValue(0)
-        self.pb.setFixedHeight(8)
-        cv.addWidget(self.pb)
-        self.lbl_stat = QLabel(" ")
-        self.lbl_stat.setStyleSheet("color:#6b6d78; font-size:9.5pt;")
-        cv.addWidget(self.lbl_stat)
-        root.addWidget(card)
+        card = tk.Frame(root, bg=C_CARD, highlightthickness=1,
+                        highlightbackground=C_BORDER)
+        card.grid(row=7, column=0, sticky="ew", padx=20, pady=3)
+        body = tk.Frame(card, bg=C_CARD)
+        body.pack(fill="x", padx=14, pady=10)
+        head = tk.Frame(body, bg=C_CARD)
+        head.pack(fill="x")
+        self.lbl_pct = tk.Label(head, text="0.0%", bg=C_CARD, fg=C_TEXT, font=F_BIG)
+        self.lbl_pct.pack(side="left")
+        self.lbl_stage = tk.Label(head, text="就绪", bg=C_CARD, fg=C_DIM,
+                                  font=F_LABEL)
+        self.lbl_stage.pack(side="left", padx=(14, 0), pady=(7, 0))
+        self.pb = ttk.Progressbar(body, maximum=100.0)
+        self.pb.pack(fill="x", pady=(7, 3))
+        self.lbl_stat = tk.Label(body, text=" ", bg=C_CARD, fg=C_FAINT,
+                                 font=F_SMALL, anchor="w")
+        self.lbl_stat.pack(fill="x")
 
         # ---------- 日志 ----------
-        card = QFrame()
-        card.setObjectName("card")
-        cv = QVBoxLayout(card)
-        cv.setContentsMargins(14, 10, 14, 12)
-        cv.setSpacing(6)
-        lt = QLabel("日志")
-        lt.setStyleSheet("color:#9a9ca8; font-weight:600;")
-        cv.addWidget(lt)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(2000)
-        cv.addWidget(self.log, 1)
-        root.addWidget(card, 1)
+        card = tk.Frame(root, bg=C_CARD, highlightthickness=1,
+                        highlightbackground=C_BORDER)
+        card.grid(row=8, column=0, sticky="nsew", padx=20, pady=(3, 14))
+        tk.Label(card, text="日志", bg=C_CARD, fg=C_DIM, font=F_CARDT
+                 ).pack(anchor="w", padx=14, pady=(8, 2))
+        lf = tk.Frame(card, bg=C_LOG_BG)
+        lf.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        self.log = tk.Text(lf, bg=C_LOG_BG, fg="#c8cad2", font=F_MONO,
+                           relief="flat", bd=0, wrap="none", height=8,
+                           insertbackground=C_TEXT, selectbackground=C_ACCENT,
+                           padx=8, pady=6, state="disabled")
+        sb = ttk.Scrollbar(lf, command=self.log.yview)
+        self.log.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.log.pack(side="left", fill="both", expand=True)
 
-        # 联动摘要
-        for cb in (self.cmb_layout, self.cmb_container, self.cmb_encoder,
-                   self.cmb_speed, self.cmb_qp, self.cmb_audio):
-            cb.currentTextChanged.connect(lambda _=None: self._refresh_summaries())
-        self.cmb_rc.currentTextChanged.connect(self._on_rc_change)
-        self.le_gop.textChanged.connect(lambda _=None: self._refresh_summaries())
-        self.chk_open.stateChanged.connect(lambda _=None: self._refresh_summaries())
+        for v in (self.var_layout, self.var_container, self.var_encoder,
+                  self.var_speed, self.var_rc, self.var_qp, self.var_track,
+                  self.var_audio, self.var_gop, self.var_open):
+            v.trace_add("write", lambda *a: self._refresh_summaries())
 
-        self._on_rc_change(self.cmb_rc.currentText())
+        self._on_rc_change(self.var_rc.get())
         self._refresh_summaries()
-        self._log("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
+        # UI 构建完成后再应用深色主题（确保所有原生控件生效）
+        if pywinstyles is not None:
+            try:
+                self.root.update_idletasks()
+                pywinstyles.apply_style(self.root, "dark")
+            except Exception:
+                pass
+        self.logline("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
+
+    # ---------- 主题 ----------
+    def _set_dark_titlebar(self):
+        """Windows 深色标题栏 + 原生控件深色（Win11 风格）"""
+        try:
+            import ctypes
+            self.root.update()
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            val = ctypes.c_int(2)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.byref(val), ctypes.sizeof(val))
+        except Exception:
+            pass
+        if pywinstyles is not None:
+            try:
+                pywinstyles.apply_style(self.root, "dark")
+            except Exception:
+                pass
+
+    def _init_style(self):
+        if sv_ttk is not None and os.environ.get("BD3D_NO_SVTTK") != "1":
+            try:
+                sv_ttk.set_theme("dark")
+            except Exception:
+                pass
+        style = ttk.Style(self.root)
+        style.configure(".", font=F_LABEL)
+        style.configure("Big.TButton", font=F_BTN)
 
     # ---------- UI 工具 ----------
-    @staticmethod
-    def _set_combo(cb, value):
-        i = cb.findText(value)
-        if i >= 0:
-            cb.setCurrentIndex(i)
+    def _refresh_summaries(self):
+        self.sec_fmt.set_summary("%s · %s" % (
+            self.var_layout.get().split("  ")[0],
+            self.var_container.get().split("（")[0]))
+        enc = "GPU" if self.var_encoder.get() == ENCODERS[0][0] else "CPU"
+        self.sec_enc.set_summary("%s · %s · %s" % (
+            enc, self.var_qp.get().split("（")[0], self.var_speed.get()))
+        self.sec_aud.set_summary("%s · %s" % (
+            self.var_track.get().split("（")[0],
+            self.var_audio.get().split("（")[0]))
+        self.sec_adv.set_summary("GOP %s%s" % (
+            self.var_gop.get(), " · 完成后打开" if self.var_open.get() else ""))
 
-    def _file_row(self, parent, label, le, browse_cmd, hint=""):
-        row = QHBoxLayout()
-        lb = QLabel(label)
-        lb.setFixedWidth(64)
-        row.addWidget(lb)
-        row.addWidget(le, 1)
-        b = QPushButton("浏览")
-        b.setFixedWidth(64)
-        b.clicked.connect(browse_cmd)
-        row.addWidget(b)
-        parent.addLayout(row)
-        h = QLabel(hint)
-        h.setStyleSheet("color:#6b6d78; font-size:9.5pt;")
-        h.setContentsMargins(72, 0, 0, 4)
-        parent.addWidget(h)
+    def _card(self, parent, title, expand=False):
+        card = tk.Frame(parent, bg=C_CARD, highlightthickness=1,
+                        highlightbackground=C_BORDER)
+        card.grid(row=1, column=0, sticky="ew", padx=20, pady=3)
+        body = tk.Frame(card, bg=C_CARD)
+        body.pack(fill="x", padx=14, pady=10)
+        return body
 
-    def _sel(self, presets, value, default):
-        for name, val in presets:
-            if name == value:
-                return val
-        return default
+    def _combo(self, parent, var, values, width, command=None):
+        """Win11 原生下拉框"""
+        cb = ttk.Combobox(parent, textvariable=var, values=values, width=width,
+                          state="readonly", font=F_LABEL)
+        if command:
+            cb.bind("<<ComboboxSelected>>", lambda e: command(var.get()))
+        return cb
+
+    def _set_combo_values(self, om, var, values):
+        om.configure(values=values)
+
+    def _file_row(self, parent, label, var, browse_cmd, hint=""):
+        row = tk.Frame(parent, bg=C_CARD)
+        row.pack(fill="x", pady=3)
+        tk.Label(row, text=label, bg=C_CARD, fg=C_TEXT, font=F_LABEL,
+                 width=8, anchor="w").pack(side="left")
+        ttk.Entry(row, textvariable=var, font=F_LABEL
+                  ).pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ttk.Button(row, text="浏览", command=browse_cmd, width=7
+                   ).pack(side="left")
+        if hint:
+            tk.Label(parent, text=hint, bg=C_CARD, fg=C_FAINT, font=F_SMALL,
+                     anchor="w").pack(fill="x", padx=(76, 0), pady=(0, 2))
 
     def _on_rc_change(self, value):
         is_cqp = value == RC_MODES[0][0]
-        self.cmb_qp.setEnabled(is_cqp)
-        self.le_bitrate.setEnabled(not is_cqp)
+        self.cmb_qp.configure(state="readonly" if is_cqp else "disabled")
+        self.entry_bitrate.configure(state="normal" if is_cqp else "disabled")
         self._refresh_summaries()
 
-    def _refresh_summaries(self):
-        self.sec_fmt.set_summary("%s · %s" % (
-            self.cmb_layout.currentText().split("  ")[0],
-            self.cmb_container.currentText().split("（")[0]))
-        enc = "GPU" if self.cmb_encoder.currentText() == ENCODERS[0][0] else "CPU"
-        self.sec_enc.set_summary("%s · %s · %s" % (
-            enc, self.cmb_qp.currentText().split("（")[0],
-            self.cmb_speed.currentText()))
-        self.sec_aud.set_summary("自动 · %s" % self.cmb_audio.currentText().split("（")[0])
-        self.sec_adv.set_summary("GOP %s%s" % (
-            self.le_gop.text(), " · 完成后打开" if self.chk_open.isChecked() else ""))
+    def _on_container_change(self, value):
+        if value == CONTAINERS[1][0]:  # MP4
+            cur = self.var_out.get()
+            if cur and cur.lower().endswith(".mkv"):
+                self.var_out.set(os.path.splitext(cur)[0] + ".mp4")
 
     # ---------- 配置 ----------
     def _load_cfg(self):
@@ -1001,53 +1039,20 @@ class MainWindow(QWidget):
             return {}
 
     def _save_cfg(self):
-        cfg = {"left": self.le_left.text(), "right": self.le_right.text(),
-               "out": self.le_out.text(), "layout": self.cmb_layout.currentText(),
-               "container": self.cmb_container.currentText(),
-               "encoder": self.cmb_encoder.currentText(),
-               "speed": self.cmb_speed.currentText(),
-               "rc": self.cmb_rc.currentText(), "qp": self.cmb_qp.currentText(),
-               "bitrate": self.le_bitrate.text(),
-               "audio": self.cmb_audio.currentText(),
-               "gop": self.le_gop.text(),
-               "open_after": self.chk_open.isChecked()}
+        cfg = {"left": self.var_left.get(), "right": self.var_right.get(),
+               "out": self.var_out.get(), "layout": self.var_layout.get(),
+               "container": self.var_container.get(), "encoder": self.var_encoder.get(),
+               "speed": self.var_speed.get(), "rc": self.var_rc.get(),
+               "qp": self.var_qp.get(), "bitrate": self.var_bitrate.get(),
+               "audio": self.var_audio.get(), "gop": self.var_gop.get(),
+               "open_after": self.var_open.get()}
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
-    # ---------- 文件选择 ----------
-    def pick_left(self):
-        p, _ = QFileDialog.getOpenFileName(
-            self, "选择左眼视频流（BDMV\\STREAM 内的主文件，如 00000.m2ts）",
-            os.path.dirname(self.le_left.text()) or "",
-            "蓝光视频流 (*.m2ts *.mts);;所有文件 (*)")
-        if p:
-            self.le_left.setText(p)
-            if not self.le_out.text():
-                base = os.path.splitext(os.path.basename(p))[0]
-                self.le_out.setText(os.path.join(os.path.dirname(p), "..",
-                                                 "..", "..", "sbs_" + base + ".mkv"))
-            self._auto_pair(p, True)
-            self._refresh_tracks(p)
-
-    def pick_right(self):
-        p, _ = QFileDialog.getOpenFileName(
-            self, "选择右眼视频流（同目录的另一条流，如 00001.m2ts）",
-            os.path.dirname(self.le_right.text()) or "",
-            "蓝光视频流 (*.m2ts *.mts);;所有文件 (*)")
-        if p:
-            self.le_right.setText(p)
-            self._auto_pair(p, False)
-
-    def pick_out(self):
-        p, _ = QFileDialog.getSaveFileName(
-            self, "保存输出文件", self.le_out.text() or "",
-            "Matroska 视频 (*.mkv);;MP4 视频 (*.mp4)")
-        if p:
-            self.le_out.setText(p)
-
+    # ---------- 文件选择与配对 ----------
     def _auto_pair(self, picked, is_left):
         d = os.path.dirname(picked)
         try:
@@ -1068,156 +1073,190 @@ class MainWindow(QWidget):
             target = others[0]
         if target is None:
             return
-        tp = os.path.join(d, target)
-        if is_left and not self.le_right.text().strip():
-            self.le_right.setText(tp)
-            self._log("已自动配对右眼文件：%s" % target)
-        elif not is_left and not self.le_left.text().strip():
-            self.le_left.setText(tp)
-            self._log("已自动配对左眼文件：%s" % target)
+        target_path = os.path.join(d, target)
+        if is_left and not self.var_right.get().strip():
+            self.var_right.set(target_path)
+            self.logline("已自动配对右眼文件：%s" % target)
+        elif not is_left and not self.var_left.get().strip():
+            self.var_left.set(target_path)
+            self.logline("已自动配对左眼文件：%s" % target)
+
+    def pick_left(self):
+        p = filedialog.askopenfilename(
+            title="选择左眼视频流（BDMV\\STREAM 内的主文件，如 00000.m2ts）",
+            filetypes=[("蓝光视频流", "*.m2ts"), ("所有文件", "*.*")])
+        if p:
+            self.var_left.set(p)
+            if not self.var_out.get():
+                base = os.path.splitext(os.path.basename(p))[0]
+                self.var_out.set(os.path.join(os.path.dirname(p), "..", "..",
+                                              "..", "sbs_" + base + ".mkv"))
+            self._auto_pair(p, is_left=True)
+            self._refresh_tracks(p)
+
+    def pick_right(self):
+        p = filedialog.askopenfilename(
+            title="选择右眼视频流（同目录的另一条流，如 00001.m2ts）",
+            filetypes=[("蓝光视频流", "*.m2ts"), ("所有文件", "*.*")])
+        if p:
+            self.var_right.set(p)
+            self._auto_pair(p, is_left=False)
 
     def _refresh_tracks(self, m2ts):
         def work():
             tracks = probe_audio_tracks(m2ts)
-            if tracks:
-                QTimer.singleShot(0, lambda: self._apply_tracks(tracks))
+            def apply():
+                if not tracks:
+                    return
+                self.audio_tracks = tracks
+                labels = ["自动（英语优先，最高声道）"] + [t[1] for t in tracks]
+                self._set_combo_values(self.cmb_track, self.var_track, labels)
+                self.var_track.set(labels[0])
+                self.logline("检测到 %d 条音轨" % len(tracks))
+            self.root.after(0, apply)
         threading.Thread(target=work, daemon=True).start()
 
-    def _apply_tracks(self, tracks):
-        self.audio_tracks = tracks
-        self.cmb_track.clear()
-        self.cmb_track.addItem("自动（英语优先，最高声道）")
-        for t in tracks:
-            self.cmb_track.addItem(t[1])
-        self._log("检测到 %d 条音轨" % len(tracks))
+    def pick_out(self):
+        p = filedialog.asksaveasfilename(
+            title="保存输出文件", defaultextension=".mkv",
+            filetypes=[("Matroska 视频", "*.mkv"), ("MP4 视频", "*.mp4")])
+        if p:
+            self.var_out.set(p)
 
-    # ---------- 运行 ----------
-    def _log(self, s):
-        self.log.appendPlainText(time.strftime("[%H:%M:%S] ") + s)
+    def logline(self, s):
+        self.log.configure(state="normal")
+        self.log.insert("end", time.strftime("[%H:%M:%S] ") + s + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
 
-    def _progress(self, pct, info):
-        self.pb.setValue(int(max(0.0, min(pct, 100.0)) * 10))
-        self.lbl_pct.setText("%.1f%%" % pct)
-        self.lbl_stat.setText(info)
-
-    def _done(self, out):
-        self.btn_start.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        self.lbl_stage.setText("完成")
-        self._progress(100.0, "输出：" + out)
-        QMessageBox.information(self, APP_TITLE, "转换完成！\n\n" + out)
-
-    def _fail(self, err):
-        self.btn_start.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        self.lbl_stage.setText("失败")
-        if err != "已取消":
-            QMessageBox.critical(self, APP_TITLE, "任务失败：\n" + err)
+    def _set_progress(self, pct, info):
+        self.pb["value"] = max(0.0, min(pct, 100.0))
+        self.lbl_pct.configure(text="%.1f%%" % pct)
+        self.lbl_stat.configure(text=info)
 
     def _check_disk_space(self, out):
         try:
             total, used, free = shutil.disk_usage(os.path.dirname(os.path.abspath(out)))
             if free < 45 * 1024 ** 3:
-                r = QMessageBox.question(
-                    self, APP_TITLE,
+                return messagebox.askyesno(
+                    APP_TITLE,
                     "输出目录所在磁盘剩余空间为 %.1f GB，低于建议值 45 GB。\n"
-                    "转换过程可能因空间不足而失败，是否仍要继续？" % (free / 1024 ** 3),
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                return r == QMessageBox.Yes
+                    "转换过程可能因空间不足而失败，是否仍要继续？" % (free / 1024 ** 3))
         except Exception:
             pass
         return True
 
+    def _sel(self, presets, value, default):
+        for name, val in presets:
+            if name == value:
+                return val
+        return default
+
+    # ---------- 任务 ----------
     def start(self):
         if self.job and self.job.is_alive():
             return
-        left = self.le_left.text().strip()
-        right = self.le_right.text().strip()
-        out = self.le_out.text().strip()
+        left = self.var_left.get().strip()
+        right = self.var_right.get().strip()
+        out = self.var_out.get().strip()
         if not left or not os.path.exists(left):
-            QMessageBox.critical(self, APP_TITLE, "请选择有效的左眼视频流文件（.m2ts）")
+            messagebox.showerror(APP_TITLE, "请选择有效的左眼视频流文件（.m2ts）")
             return
         if not right or not os.path.exists(right):
-            QMessageBox.critical(self, APP_TITLE, "请选择有效的右眼视频流文件（.m2ts）")
+            messagebox.showerror(APP_TITLE, "请选择有效的右眼视频流文件（.m2ts）")
             return
         if not out:
-            QMessageBox.critical(self, APP_TITLE, "请选择输出文件路径")
+            messagebox.showerror(APP_TITLE, "请选择输出文件路径")
             return
         if not self._check_disk_space(out):
             return
-        container = self._sel(CONTAINERS, self.cmb_container.currentText(), "mkv")
+        container = self._sel(CONTAINERS, self.var_container.get(), "mkv")
         if container == "mp4" and not out.lower().endswith(".mp4"):
             out = os.path.splitext(out)[0] + ".mp4"
-            self.le_out.setText(out)
+            self.var_out.set(out)
         try:
-            max_frames = int(self.le_frames.text()) if self.le_frames.text().strip() else 0
-            gop = max(12, int(self.le_gop.text()))
-            bitrate = max(1, int(self.le_bitrate.text()))
+            max_frames = int(self.var_frames.get()) if self.var_frames.get().strip() else 0
+            gop = max(12, int(self.var_gop.get()))
+            bitrate = max(1, int(self.var_bitrate.get()))
         except ValueError:
             max_frames, gop, bitrate = 0, 96, 20
-        qp = self._sel(QP_LEVELS, self.cmb_qp.currentText(), 18)
-        audio_mode = self._sel(AUDIO_MODES, self.cmb_audio.currentText(), "dual")
+        qp = self._sel(QP_LEVELS, self.var_qp.get(), 18)
+        audio_mode = self._sel(AUDIO_MODES, self.var_audio.get(), "dual")
         audio_track = None
-        if self.audio_tracks and self.cmb_track.currentIndex() > 0:
-            pos = self.cmb_track.currentIndex() - 1
-            if 0 <= pos < len(self.audio_tracks):
-                audio_track = self.audio_tracks[pos][0]
+        if self.audio_tracks:
+            labels = ["自动（英语优先，最高声道）"] + [t[1] for t in self.audio_tracks]
+            try:
+                pos = labels.index(self.var_track.get()) - 1
+                if pos >= 0:
+                    audio_track = self.audio_tracks[pos][0]
+            except ValueError:
+                pass
         self._save_cfg()
-        self.btn_start.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
-        self.lbl_stage.setText("准备中")
-        self._log("开始任务：%s" % os.path.basename(left))
-        self._log("布局 %s · 容器 %s · 编码器 %s" % (
-            self.cmb_layout.currentText().split("  ")[0], container.upper(),
-            "GPU" if self.cmb_encoder.currentText() == ENCODERS[0][0] else "CPU"))
+        self.btn_start.configure(state="disabled")
+        self.btn_cancel.configure(state="normal")
+        self.lbl_stage.configure(text="准备中")
+        self.logline("开始任务：%s" % os.path.basename(left))
+        self.logline("布局 %s · 容器 %s · 编码器 %s" % (
+            self.var_layout.get().split("  ")[0], container.upper(),
+            "GPU" if self.var_encoder.get() == ENCODERS[0][0] else "CPU"))
         self.job = ConvertJob(
             left, right, out,
-            layout=self._sel(LAYOUTS, self.cmb_layout.currentText(), "full_sbs"),
+            layout=self._sel(LAYOUTS, self.var_layout.get(), "full_sbs"),
             container=container,
-            encoder=self._sel(ENCODERS, self.cmb_encoder.currentText(), "gpu"),
-            rc=self._sel(RC_MODES, self.cmb_rc.currentText(), "cqp"),
+            encoder=self._sel(ENCODERS, self.var_encoder.get(), "gpu"),
+            rc=self._sel(RC_MODES, self.var_rc.get(), "cqp"),
             qp=qp, bitrate=bitrate,
-            speed=self._sel(SPEEDS, self.cmb_speed.currentText(), "quality"),
+            speed=self._sel(SPEEDS, self.var_speed.get(), "quality"),
             gop=gop, audio_mode=audio_mode, audio_track=audio_track,
-            open_after=self.chk_open.isChecked(), max_frames=max_frames,
-            on_log=lambda s: self.bridge.log.emit(s),
-            on_progress=lambda st, pct, info: self.bridge.progress.emit(pct, info),
-            on_done=lambda o: self.bridge.done.emit(o),
-            on_error=lambda e: self.bridge.error.emit(e))
+            open_after=self.var_open.get(), max_frames=max_frames,
+            on_log=lambda s: self.root.after(0, self.logline, s),
+            on_progress=lambda st, pct, info: self.root.after(0, self._set_progress, pct, info),
+            on_done=lambda o: self.root.after(0, self.done, o),
+            on_error=lambda e: self.root.after(0, self.fail, e))
         self.job.start()
 
     def cancel(self):
         if self.job:
-            self._log("正在取消...")
-            self.lbl_stage.setText("正在取消")
+            self.logline("正在取消...")
+            self.lbl_stage.configure(text="正在取消")
             self.job.cancel()
+
+    def done(self, out):
+        self.btn_start.configure(state="normal")
+        self.btn_cancel.configure(state="disabled")
+        self.lbl_stage.configure(text="完成")
+        self._set_progress(100.0, "输出：" + out)
+        messagebox.showinfo(APP_TITLE, "转换完成！\n\n" + out)
+
+    def fail(self, err):
+        self.btn_start.configure(state="normal")
+        self.btn_cancel.configure(state="disabled")
+        self.lbl_stage.configure(text="失败")
+        if err != "已取消":
+            messagebox.showerror(APP_TITLE, "任务失败：\n" + err)
 
     def concat(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "按顺序选择要拼接的视频（第一段、第二段...）", "",
-            "视频文件 (*.mkv *.mp4);;所有文件 (*)")
+        files = filedialog.askopenfilenames(
+            title="按顺序选择要拼接的视频（第一段、第二段...）",
+            filetypes=[("视频文件", "*.mkv *.mp4"), ("所有文件", "*.*")])
         if not files or len(files) < 2:
             return
-        out, _ = QFileDialog.getSaveFileName(
-            self, "保存合并后的文件", "", "Matroska 视频 (*.mkv)")
+        out = filedialog.asksaveasfilename(
+            title="保存合并后的文件", defaultextension=".mkv",
+            filetypes=[("Matroska 视频", "*.mkv")])
         if not out:
             return
-        self._log("开始拼接 %d 个文件" % len(files))
-        self.lbl_stage.setText("拼接中")
+        self.logline("开始拼接 %d 个文件" % len(files))
+        self.lbl_stage.configure(text="拼接中")
         concat_files(list(files), out,
-                     on_log=lambda s: self.bridge.log.emit(s),
-                     on_done=lambda o: self.bridge.done.emit(o),
-                     on_error=lambda e: self.bridge.error.emit(e))
+                     on_log=lambda s: self.root.after(0, self.logline, s),
+                     on_done=lambda o: self.root.after(0, self._concat_done, o),
+                     on_error=lambda e: self.root.after(0, self.fail, e))
 
-    def closeEvent(self, event):
-        if self.job and self.job.is_alive():
-            r = QMessageBox.question(self, APP_TITLE, "任务进行中，确定要退出吗？",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if r != QMessageBox.Yes:
-                event.ignore()
-                return
-            self.job.cancel()
-        event.accept()
+    def _concat_done(self, out):
+        self._set_progress(100.0, "拼接完成：" + out)
+        self.lbl_stage.configure(text="完成")
+        messagebox.showinfo(APP_TITLE, "拼接完成！\n\n" + out)
 
 
 def main():
@@ -1235,12 +1274,23 @@ def main():
         skipdemux = "--skipdemux" in args
         qidx = int(get("--quality", "0") or 0)
         qp = QP_LEVELS[max(0, min(qidx, len(QP_LEVELS) - 1))][1]
+        logfile = get("--logfile")
         if not left or not right or not out:
             print("用法: python bd3d2sbs.py --cli --left 00000.m2ts --right 00001.m2ts "
                   "--out x.mkv [--layout full_sbs|half_sbs|full_tab|half_tab] "
                   "[--container mkv|mp4] [--encoder gpu|cpu] [--quality 0-3] "
-                  "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux]")
+                  "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux] [--logfile f]")
             return 1
+
+        def _out(s):
+            print(s, flush=True)
+            if logfile:
+                try:
+                    with open(logfile, "a", encoding="utf-8") as f:
+                        f.write(s + "\n")
+                except Exception:
+                    pass
+
         job = ConvertJob(
             left, right, out,
             layout=get("--layout", "full_sbs"),
@@ -1250,23 +1300,23 @@ def main():
             qp=qp,
             audio_mode=("none" if noaudio else "dual"),
             max_frames=frames, skip_demux=skipdemux,
-            on_log=lambda s: print(s, flush=True),
-            on_progress=lambda st, pct, info: print(
-                "[%5.1f%%] %s %s" % (pct, st, info), flush=True))
+            on_log=_out,
+            on_progress=lambda st, pct, info: _out(
+                "[%5.1f%%] %s %s" % (pct, st, info)))
         job.run()
         return 0
-    app = QApplication(sys.argv)
-    app.setStyleSheet(QSS)
-    win = MainWindow()
-    win.show()
+    enable_dpi_awareness()
+    root = tk.Tk()
+    apply_font_scale(root)
+    app = App(root)
     if "--selftest" in args:
-        def _check():
+        def _selfcheck():
             msg = ""
             try:
-                win.sec_fmt.toggle()
-                assert win.sec_fmt._expanded, "折叠区展开失败"
-                win.sec_fmt.toggle()
-                assert not win.sec_fmt._expanded, "折叠区收起失败"
+                app.sec_fmt.toggle()
+                assert app.sec_fmt._expanded, "折叠区展开失败"
+                app.sec_fmt.toggle()
+                assert not app.sec_fmt._expanded, "折叠区收起失败"
                 assert os.path.exists(FFMPEG), "找不到 ffmpeg: " + FFMPEG
                 assert os.path.exists(TSMUXER), "找不到 tsMuxeR: " + TSMUXER
                 assert os.path.exists(FRIMSOURCE), "找不到 FRIMSource: " + FRIMSOURCE
@@ -1279,10 +1329,47 @@ def main():
                     f.write(msg + "\nBIN_DIR=" + BIN_DIR + "\n")
             except Exception:
                 pass
-            print(msg, flush=True)
-            app.quit()
-        QTimer.singleShot(500, _check)
-    return app.exec()
+            print(msg)
+            root.destroy()
+        root.after(400, _selfcheck)
+    if "--layoutcheck" in args:
+        def _layoutcheck():
+            try:
+                root.state("zoomed")
+            except Exception:
+                pass
+
+            def _report():
+                root.update_idletasks()
+                out = ["window=%dx%d" % (root.winfo_width(), root.winfo_height()),
+                       "screen=%dx%d" % (root.winfo_screenwidth(),
+                                         root.winfo_screenheight()),
+                       "tk_scaling=%.3f" % root.tk.call("tk", "scaling")]
+                try:
+                    fpx = root.winfo_fpixels("1i")
+                    out.append("dpi=%.1f" % fpx)
+                except Exception:
+                    pass
+
+                def info(tag, wdg):
+                    try:
+                        x = wdg.winfo_rootx() - root.winfo_rootx()
+                        out.append("%s: x=%d w=%d right=%d vis=%s" % (
+                            tag, x, wdg.winfo_width(), x + wdg.winfo_width(),
+                            wdg.winfo_ismapped()))
+                    except Exception as e:
+                        out.append("%s: ERR %s" % (tag, e))
+
+                info("btn_start", app.btn_start)
+                info("progressbar", app.pb)
+                info("summary_fmt", app.sec_fmt.sum_lbl)
+                print("\n".join(out), flush=True)
+                root.destroy()
+
+            root.after(1000, _report)
+        root.after(300, _layoutcheck)
+    root.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
