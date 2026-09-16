@@ -1,0 +1,23 @@
+# 工具链二进制（体积过大，不入库；运行 download_tools.ps1 获取）
+bin/
+
+# PyInstaller 构建产物
+dist/
+build/
+*.spec
+
+# 用户配置
+config.json
+
+# Python
+__pycache__/
+*.pyc
+
+# 视频文件（版权内容严禁入库）
+*.mkv
+*.mp4
+*.h265
+*.264
+*.mvc
+*.ts
+*.ssif
