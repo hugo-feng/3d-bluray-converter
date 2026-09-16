@@ -27,6 +27,15 @@ import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+try:
+    import pywinstyles  # Win11 标题栏深色（MIT 开源）
+except Exception:
+    pywinstyles = None
+try:
+    import sv_ttk  # Win11 Fluent 风格控件主题（Sun Valley, MIT 开源）
+except Exception:
+    sv_ttk = None
+
 APP_TITLE = "BD3D 转换器"
 APP_VERSION = "v1.5"
 
@@ -128,6 +137,72 @@ def enable_dpi_awareness():
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+
+def to_short_path(path):
+    """转 8.3 短路径，规避 AviSynth 插件对非 ASCII 路径的兼容问题"""
+    if os.name != "nt":
+        return path
+    try:
+        import ctypes
+        from ctypes import wintypes
+        fn = ctypes.windll.kernel32.GetShortPathNameW
+        fn.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        fn.restype = wintypes.DWORD
+        buf = ctypes.create_unicode_buffer(2048)
+        n = fn(path, buf, 2048)
+        if n and n < 2048 and buf.value:
+            return buf.value
+    except Exception:
+        pass
+    return path
+
+
+def is_ascii(s):
+    return all(ord(c) < 128 for c in s)
+
+
+def safe_plugin_path(dll_path):
+    """保证 AviSynth 插件路径全 ASCII（FRIMSource 不兼容非 ASCII 路径）"""
+    if is_ascii(dll_path):
+        return dll_path
+    sp = to_short_path(dll_path)
+    if is_ascii(sp):
+        return sp
+    # 复制插件到 ASCII 临时目录
+    import tempfile
+    import shutil
+    for base in (os.environ.get("TEMP", ""), tempfile.gettempdir(),
+                 os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Temp")):
+        if not base or not is_ascii(base):
+            continue
+        dst_dir = os.path.join(base, "bd3d_plugin")
+        try:
+            os.makedirs(dst_dir, exist_ok=True)
+            src_dir = os.path.dirname(dll_path)
+            for f in ("FRIMSource.dll", "libmfxsw64.dll",
+                      "msvcp100.dll", "msvcr100.dll"):
+                src = os.path.join(src_dir, f)
+                if os.path.exists(src):
+                    shutil.copy2(src, os.path.join(dst_dir, f))
+            cand = os.path.join(dst_dir, "FRIMSource.dll")
+            if os.path.exists(cand):
+                return cand
+        except Exception:
+            continue
+    return dll_path
+
+
+def ascii_workdir(preferred, name):
+    """中间文件工作目录必须全 ASCII；否则改用同盘根目录"""
+    if is_ascii(preferred):
+        return preferred
+    drive = os.path.splitdrive(os.path.abspath(preferred))[0]
+    if drive:
+        alt = os.path.join(drive + os.sep, "_bd3d_work_" + name)
+        if is_ascii(alt):
+            return alt
+    return preferred
 
 
 class Cancelled(Exception):
@@ -253,7 +328,10 @@ class ConvertJob(threading.Thread):
         try:
             name = os.path.splitext(os.path.basename(self.left_file))[0]
             out_dir = os.path.dirname(os.path.abspath(self.out_file))
-            self.workdir = os.path.join(out_dir, "_bd3d_work_" + name)
+            preferred = os.path.join(out_dir, "_bd3d_work_" + name)
+            self.workdir = ascii_workdir(preferred, name)
+            if os.path.normcase(self.workdir) != os.path.normcase(preferred):
+                self._log("输出路径含非 ASCII 字符，中间文件改用：" + self.workdir)
             os.makedirs(self.workdir, exist_ok=True)
             left_es = os.path.join(self.workdir, "left.264")
             right_es = os.path.join(self.workdir, "right.mvc")
@@ -387,7 +465,7 @@ class ConvertJob(threading.Thread):
                'num_frames=%d, cache=2, platform="sw")\n'
                'left  = SelectEven(interleaved)\n'
                'right = SelectOdd(interleaved)\n'
-               '%s' % (FRIMSOURCE, base, dep, nframes, tail))
+               '%s' % (safe_plugin_path(FRIMSOURCE), base, dep, nframes, tail))
         if self.max_frames:
             avs += "Trim(0, %d)\n" % (total - 1)
         return avs
@@ -738,12 +816,8 @@ class App:
         tk.Label(r, text="码率(M)", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
                  width=7, anchor="w").pack(side="left")
         self.var_bitrate = tk.StringVar(value=str(self.cfg.get("bitrate", 20)))
-        self.entry_bitrate = tk.Entry(
-            r, textvariable=self.var_bitrate, width=6, bg=C_INPUT, fg=C_TEXT,
-            font=F_LABEL, relief="flat", insertbackground=C_TEXT,
-            highlightthickness=1, highlightbackground=C_BORDER,
-            highlightcolor=C_ACCENT, disabledbackground="#24262c",
-            disabledforeground=C_FAINT)
+        self.entry_bitrate = ttk.Entry(r, textvariable=self.var_bitrate, width=7,
+                                       font=F_LABEL)
         self.entry_bitrate.pack(side="left", padx=6)
 
         # ---------- 音频 ----------
@@ -771,43 +845,28 @@ class App:
         tk.Label(r, text="关键帧间隔", bg=C_CARD, fg=C_TEXT, font=F_LABEL,
                  width=9, anchor="w").pack(side="left")
         self.var_gop = tk.StringVar(value=str(self.cfg.get("gop", 96)))
-        tk.Entry(r, textvariable=self.var_gop, width=6, bg=C_INPUT, fg=C_TEXT,
-                 font=F_LABEL, relief="flat", insertbackground=C_TEXT,
-                 highlightthickness=1, highlightbackground=C_BORDER,
-                 highlightcolor=C_ACCENT).pack(side="left", padx=(6, 18))
+        ttk.Entry(r, textvariable=self.var_gop, width=7, font=F_LABEL
+                  ).pack(side="left", padx=(6, 18))
         self.var_open = tk.BooleanVar(value=self.cfg.get("open_after", True))
-        ttk.Checkbutton(r, text="完成后打开输出目录", variable=self.var_open,
-                        style="Dark.TCheckbutton").pack(side="left", padx=(0, 18))
+        ttk.Checkbutton(r, text="完成后打开输出目录", variable=self.var_open
+                        ).pack(side="left", padx=(0, 18))
         tk.Label(r, text="限制帧数（调试）", bg=C_CARD, fg=C_DIM, font=F_LABEL
                  ).pack(side="left")
         self.var_frames = tk.StringVar(value="")
-        tk.Entry(r, textvariable=self.var_frames, width=8, bg=C_INPUT, fg=C_TEXT,
-                 font=F_LABEL, relief="flat", insertbackground=C_TEXT,
-                 highlightthickness=1, highlightbackground=C_BORDER,
-                 highlightcolor=C_ACCENT).pack(side="left", padx=6)
+        ttk.Entry(r, textvariable=self.var_frames, width=9, font=F_LABEL
+                  ).pack(side="left", padx=6)
 
         # ---------- 按钮 ----------
         btns = tk.Frame(root, bg=C_BG)
         btns.grid(row=6, column=0, sticky="ew", padx=20, pady=(10, 4))
-        self.btn_start = tk.Button(
-            btns, text="开始转换", command=self.start, width=12, height=1,
-            bg=C_ACCENT, fg="#ffffff", activebackground=C_ACCENT_H,
-            activeforeground="#ffffff", font=F_BTN, relief="flat", bd=0,
-            cursor="hand2", padx=14, pady=7)
+        self.btn_start = ttk.Button(btns, text="开始转换", command=self.start,
+                                    width=13, style="Big.TButton")
         self.btn_start.pack(side="left")
-        self.btn_cancel = tk.Button(
-            btns, text="取消", command=self.cancel, width=8,
-            bg=C_BTN2, fg=C_TEXT, activebackground=C_BTN2_H,
-            activeforeground=C_TEXT, font=F_LABEL, relief="flat", bd=0,
-            cursor="hand2", padx=12, pady=7, state="disabled")
+        self.btn_cancel = ttk.Button(btns, text="取消", command=self.cancel,
+                                     width=9, state="disabled")
         self.btn_cancel.pack(side="left", padx=10)
-        tk.Button(
-            btns, text="无损拼接（完整片）", command=self.concat, width=16,
-            bg=C_CARD, fg=C_DIM, activebackground=C_BTN2,
-            activeforeground=C_TEXT, font=F_LABEL, relief="flat", bd=0,
-            cursor="hand2", padx=12, pady=7,
-            highlightthickness=1, highlightbackground=C_BORDER
-        ).pack(side="right")
+        ttk.Button(btns, text="无损拼接（完整片）", command=self.concat,
+                   width=18).pack(side="right")
 
         # ---------- 进度 ----------
         card = tk.Frame(root, bg=C_CARD, highlightthickness=1,
@@ -822,8 +881,7 @@ class App:
         self.lbl_stage = tk.Label(head, text="就绪", bg=C_CARD, fg=C_DIM,
                                   font=F_LABEL)
         self.lbl_stage.pack(side="left", padx=(14, 0), pady=(7, 0))
-        self.pb = ttk.Progressbar(body, style="Dark.Horizontal.TProgressbar",
-                                  maximum=100.0)
+        self.pb = ttk.Progressbar(body, maximum=100.0)
         self.pb.pack(fill="x", pady=(7, 3))
         self.lbl_stat = tk.Label(body, text=" ", bg=C_CARD, fg=C_FAINT,
                                  font=F_SMALL, anchor="w")
@@ -841,9 +899,7 @@ class App:
                            relief="flat", bd=0, wrap="none", height=8,
                            insertbackground=C_TEXT, selectbackground=C_ACCENT,
                            padx=8, pady=6, state="disabled")
-        sb = tk.Scrollbar(lf, command=self.log.yview, bg=C_BTN2,
-                          troughcolor=C_LOG_BG, activebackground=C_BTN2_H,
-                          relief="flat", bd=0, width=12)
+        sb = ttk.Scrollbar(lf, command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
@@ -855,11 +911,18 @@ class App:
 
         self._on_rc_change(self.var_rc.get())
         self._refresh_summaries()
+        # UI 构建完成后再应用深色主题（确保所有原生控件生效）
+        if pywinstyles is not None:
+            try:
+                self.root.update_idletasks()
+                pywinstyles.apply_style(self.root, "dark")
+            except Exception:
+                pass
         self.logline("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
 
     # ---------- 主题 ----------
     def _set_dark_titlebar(self):
-        """Windows 深色标题栏"""
+        """Windows 深色标题栏 + 原生控件深色（Win11 风格）"""
         try:
             import ctypes
             self.root.update()
@@ -869,38 +932,21 @@ class App:
                 hwnd, 20, ctypes.byref(val), ctypes.sizeof(val))
         except Exception:
             pass
+        if pywinstyles is not None:
+            try:
+                pywinstyles.apply_style(self.root, "dark")
+            except Exception:
+                pass
 
     def _init_style(self):
+        if sv_ttk is not None:
+            try:
+                sv_ttk.set_theme("dark")
+            except Exception:
+                pass
         style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-        style.configure("Dark.TCombobox",
-                        fieldbackground=C_INPUT, background=C_INPUT,
-                        foreground=C_TEXT, arrowcolor=C_DIM,
-                        bordercolor=C_BORDER, lightcolor=C_INPUT,
-                        darkcolor=C_INPUT, selectbackground=C_INPUT,
-                        selectforeground=C_TEXT, padding=(6, 3))
-        style.map("Dark.TCombobox",
-                  fieldbackground=[("readonly", C_INPUT)],
-                  foreground=[("readonly", C_TEXT)],
-                  bordercolor=[("focus", C_ACCENT)],
-                  arrowcolor=[("active", C_TEXT)])
-        style.configure("Dark.TCheckbutton", background=C_CARD, foreground=C_DIM,
-                        focuscolor=C_CARD)
-        style.map("Dark.TCheckbutton",
-                  background=[("active", C_CARD)],
-                  foreground=[("active", C_TEXT)])
-        style.configure("Dark.Horizontal.TProgressbar",
-                        troughcolor=C_INPUT, background=C_ACCENT,
-                        bordercolor=C_CARD, lightcolor=C_ACCENT,
-                        darkcolor=C_ACCENT, thickness=8)
-        self.root.option_add("*TCombobox*Listbox.background", C_CARD)
-        self.root.option_add("*TCombobox*Listbox.foreground", C_TEXT)
-        self.root.option_add("*TCombobox*Listbox.selectBackground", C_ACCENT)
-        self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
-        self.root.option_add("*TCombobox*Listbox.font", "Microsoft YaHei UI 10")
+        style.configure(".", font=F_LABEL)
+        style.configure("Big.TButton", font=F_BTN)
 
     # ---------- UI 工具 ----------
     def _refresh_summaries(self):
@@ -925,46 +971,33 @@ class App:
         return body
 
     def _combo(self, parent, var, values, width, command=None):
-        """原生下拉菜单按钮（点击必展开，深色）"""
-        om = tk.OptionMenu(parent, var, *values, command=command)
-        om.configure(bg=C_INPUT, fg=C_TEXT, activebackground=C_BTN2_H,
-                     activeforeground=C_TEXT, relief="flat", bd=0,
-                     highlightthickness=0, font=F_LABEL, anchor="w",
-                     padx=6, pady=3, width=width, cursor="hand2")
-        om["menu"].configure(bg=C_CARD, fg=C_TEXT, activebackground=C_ACCENT,
-                             activeforeground="#ffffff", font=F_LABEL,
-                             relief="flat", bd=0)
-        return om
+        """Win11 原生下拉框"""
+        cb = ttk.Combobox(parent, textvariable=var, values=values, width=width,
+                          state="readonly", font=F_LABEL)
+        if command:
+            cb.bind("<<ComboboxSelected>>", lambda e: command(var.get()))
+        return cb
 
     def _set_combo_values(self, om, var, values):
-        """更新原生 OptionMenu 的选项列表"""
-        menu = om["menu"]
-        menu.delete(0, "end")
-        for v in values:
-            menu.add_command(label=v, command=lambda val=v: var.set(val))
+        om.configure(values=values)
 
     def _file_row(self, parent, label, var, browse_cmd, hint=""):
         row = tk.Frame(parent, bg=C_CARD)
         row.pack(fill="x", pady=3)
         tk.Label(row, text=label, bg=C_CARD, fg=C_TEXT, font=F_LABEL,
                  width=8, anchor="w").pack(side="left")
-        tk.Entry(row, textvariable=var, bg=C_INPUT, fg=C_TEXT, font=F_LABEL,
-                 relief="flat", insertbackground=C_TEXT,
-                 highlightthickness=1, highlightbackground=C_BORDER,
-                 highlightcolor=C_ACCENT
-                 ).pack(side="left", fill="x", expand=True, padx=(6, 8), ipady=4)
-        tk.Button(row, text="浏览", command=browse_cmd, width=6,
-                  bg=C_BTN2, fg=C_TEXT, activebackground=C_BTN2_H,
-                  activeforeground=C_TEXT, font=F_LABEL, relief="flat", bd=0,
-                  cursor="hand2", padx=8, pady=3).pack(side="left")
+        ttk.Entry(row, textvariable=var, font=F_LABEL
+                  ).pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ttk.Button(row, text="浏览", command=browse_cmd, width=7
+                   ).pack(side="left")
         if hint:
             tk.Label(parent, text=hint, bg=C_CARD, fg=C_FAINT, font=F_SMALL,
                      anchor="w").pack(fill="x", padx=(76, 0), pady=(0, 2))
 
     def _on_rc_change(self, value):
         is_cqp = value == RC_MODES[0][0]
-        self.cmb_qp.configure(state="normal" if is_cqp else "disabled")
-        self.entry_bitrate.configure(state="disabled" if is_cqp else "normal")
+        self.cmb_qp.configure(state="readonly" if is_cqp else "disabled")
+        self.entry_bitrate.configure(state="normal" if is_cqp else "disabled")
         self._refresh_summaries()
 
     def _on_container_change(self, value):
