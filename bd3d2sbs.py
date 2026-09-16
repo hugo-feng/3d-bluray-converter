@@ -81,9 +81,21 @@ MUX_WEIGHT = 5.0
 
 if getattr(sys, "frozen", False):
     _EXE_DIR = os.path.dirname(sys.executable)
-    _BIN_BASE = _EXE_DIR
     _CFG_BASE = _EXE_DIR
     _ICO_BASE = getattr(sys, "_MEIPASS", _EXE_DIR)
+
+    def _find_bin_base():
+        """兼容两种打包：bin 在 exe 旁（onedir 部署）或打包内（onefile）"""
+        cands = [os.path.join(_EXE_DIR, "bin")]
+        mp = getattr(sys, "_MEIPASS", None)
+        if mp:
+            cands.append(os.path.join(mp, "bin"))
+        for c in cands:
+            if os.path.exists(os.path.join(c, "ffmpeg.exe")):
+                return os.path.dirname(c)
+        return _EXE_DIR
+
+    _BIN_BASE = _find_bin_base()
 else:
     _BIN_BASE = _CFG_BASE = _ICO_BASE = os.path.dirname(os.path.abspath(__file__))
 BIN_DIR = os.path.join(_BIN_BASE, "bin")
