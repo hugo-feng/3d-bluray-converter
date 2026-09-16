@@ -23,8 +23,8 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-APP_TITLE = "BD3D → 3D 视频转换器"
-APP_VERSION = "v1.2"
+APP_TITLE = "BD3D 转换器"
+APP_VERSION = "v1.3"
 
 # ---- 界面配色（深色专业风格）----
 C_BG = "#17181c"
@@ -33,19 +33,21 @@ C_BORDER = "#2e3038"
 C_INPUT = "#2a2c34"
 C_TEXT = "#e8e9ed"
 C_DIM = "#9a9ca8"
+C_FAINT = "#6b6d78"
 C_ACCENT = "#3574f0"
 C_ACCENT_H = "#2b5fd0"
 C_BTN2 = "#33363e"
 C_BTN2_H = "#3d4149"
 C_LOG_BG = "#121317"
 
-F_TITLE = ("Microsoft YaHei UI", 16, "bold")
+F_TITLE = ("Microsoft YaHei UI", 15, "bold")
 F_CARDT = ("Microsoft YaHei UI", 11, "bold")
 F_LABEL = ("Microsoft YaHei UI", 11)
 F_BTN = ("Microsoft YaHei UI", 12, "bold")
 F_BIG = ("Microsoft YaHei UI", 22, "bold")
 F_SMALL = ("Microsoft YaHei UI", 10)
 F_MONO = ("Consolas", 10)
+F_ARROW = ("Segoe UI Symbol", 11)
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -100,6 +102,7 @@ FFMPEG = os.path.join(BIN_DIR, "ffmpeg.exe")
 FFPROBE = os.path.join(BIN_DIR, "ffprobe.exe")
 TSMUXER = os.path.join(BIN_DIR, "tsMuxeR.exe")
 FRIMSOURCE = os.path.join(BIN_DIR, "FRIMSource.dll")
+ICON_PATH = os.path.join(_BIN_BASE, "app.ico")
 CONFIG_PATH = os.path.join(_CFG_BASE, "config.json")
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -516,6 +519,52 @@ def concat_mkvs(files, out_mkv, on_log=None, on_done=None, on_error=None):
 
 
 # ==================== GUI ====================
+class Section(ctk.CTkFrame):
+    """可折叠设置区：点击标题栏展开/收起，收起时显示当前参数摘要"""
+
+    def __init__(self, parent, title):
+        super().__init__(parent, fg_color=C_CARD, corner_radius=10,
+                         border_width=1, border_color=C_BORDER)
+        self._expanded = False
+        self._summary = ""
+
+        self.head = ctk.CTkFrame(self, fg_color="transparent", height=36,
+                                 cursor="hand2")
+        self.head.pack(fill="x")
+        self.head.pack_propagate(False)
+        self.arrow = ctk.CTkLabel(self.head, text="›", width=16, font=F_ARROW,
+                                  text_color=C_DIM)
+        self.arrow.pack(side="left", padx=(12, 2))
+        self.title_lbl = ctk.CTkLabel(self.head, text=title, font=F_CARDT,
+                                      text_color=C_TEXT)
+        self.title_lbl.pack(side="left")
+        self.sum_lbl = ctk.CTkLabel(self.head, text="", font=F_SMALL,
+                                    text_color=C_FAINT)
+        self.sum_lbl.pack(side="right", padx=14)
+        for w in (self.head, self.arrow, self.title_lbl, self.sum_lbl):
+            w.bind("<Button-1>", self.toggle)
+            w.bind("<Enter>", lambda e: self.title_lbl.configure(text_color=C_ACCENT))
+            w.bind("<Leave>", lambda e: self.title_lbl.configure(text_color=C_TEXT))
+
+        self.body = ctk.CTkFrame(self, fg_color="transparent")
+
+    def toggle(self, _=None):
+        self._expanded = not self._expanded
+        if self._expanded:
+            self.arrow.configure(text="⌄")
+            self.body.pack(fill="x", padx=14, pady=(0, 12))
+            self.sum_lbl.configure(text="")
+        else:
+            self.arrow.configure(text="›")
+            self.body.pack_forget()
+            self.sum_lbl.configure(text=self._summary)
+
+    def set_summary(self, text):
+        self._summary = text
+        if not self._expanded:
+            self.sum_lbl.configure(text=text)
+
+
 class App:
     def __init__(self, root: "ctk.CTk"):
         self.root = root
@@ -524,21 +573,33 @@ class App:
         self.audio_tracks = []
 
         root.title(APP_TITLE)
-        root.geometry("960x800")
-        root.minsize(900, 720)
+        root.geometry("880x760")
+        root.minsize(780, 620)
         root.configure(fg_color=C_BG)
+        try:
+            root.iconbitmap(ICON_PATH)
+        except Exception:
+            pass
+
+        root.grid_columnconfigure(0, weight=1)
+        root.grid_rowconfigure(8, weight=1)  # 日志区拉伸
 
         # ---------- 顶栏 ----------
         top = ctk.CTkFrame(root, fg_color="transparent")
-        top.pack(fill="x", padx=20, pady=(14, 0))
-        ctk.CTkLabel(top, text=APP_TITLE, font=F_TITLE, text_color=C_TEXT).pack(side="left")
-        ctk.CTkLabel(top, text=APP_VERSION, font=F_SMALL, text_color=C_DIM
-                     ).pack(side="left", padx=(8, 0), pady=(5, 0))
+        top.grid(row=0, column=0, sticky="ew", padx=20, pady=(14, 6))
+        ctk.CTkLabel(top, text=APP_TITLE, font=F_TITLE,
+                     text_color=C_TEXT).pack(side="left")
+        ctk.CTkLabel(top, text=APP_VERSION, font=F_SMALL, text_color=C_FAINT
+                     ).pack(side="left", padx=(7, 0), pady=(4, 0))
         ctk.CTkLabel(top, text="3D 蓝光 → SBS / TAB · GPU 硬件加速",
-                     font=F_SMALL, text_color=C_DIM).pack(side="right", pady=(5, 0))
+                     font=F_SMALL, text_color=C_DIM).pack(side="right", pady=(4, 0))
 
         # ---------- 源与输出 ----------
-        body = self._card(root, "源与输出")
+        card = ctk.CTkFrame(root, fg_color=C_CARD, corner_radius=10,
+                            border_width=1, border_color=C_BORDER)
+        card.grid(row=1, column=0, sticky="ew", padx=20, pady=4)
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.pack(fill="x", padx=14, pady=10)
         self.var_mpls = ctk.StringVar(value=self.cfg.get("mpls", ""))
         self._file_row(body, "源文件", self.var_mpls, self.pick_mpls,
                        "BDMV\\PLAYLIST 下的 .mpls")
@@ -547,149 +608,174 @@ class App:
                        "建议输出磁盘剩余空间 ≥ 45 GB")
 
         # ---------- 输出格式 ----------
-        body = self._card(root, "输出格式")
-        r = ctk.CTkFrame(body, fg_color="transparent")
+        self.sec_fmt = Section(root, "输出格式")
+        self.sec_fmt.grid(row=2, column=0, sticky="ew", padx=20, pady=4)
+        r = ctk.CTkFrame(self.sec_fmt.body, fg_color="transparent")
         r.pack(fill="x", pady=2)
         ctk.CTkLabel(r, text="3D 布局", width=64, anchor="w", font=F_LABEL,
                      text_color=C_TEXT).pack(side="left")
         self.var_layout = ctk.StringVar(value=self.cfg.get("layout", LAYOUTS[0][0]))
-        self._menu(r, self.var_layout, [x[0] for x in LAYOUTS], 250,
-                   self._on_layout_change).pack(side="left", padx=(8, 24))
+        self._menu(r, self.var_layout, [x[0] for x in LAYOUTS],
+                   250).pack(side="left", padx=(8, 20))
         ctk.CTkLabel(r, text="容器", width=40, anchor="w", font=F_LABEL,
                      text_color=C_TEXT).pack(side="left")
         self.var_container = ctk.StringVar(value=self.cfg.get("container", CONTAINERS[0][0]))
-        self._menu(r, self.var_container, [x[0] for x in CONTAINERS], 220,
+        self._menu(r, self.var_container, [x[0] for x in CONTAINERS], 210,
                    self._on_container_change).pack(side="left", padx=8)
 
         # ---------- 编码设置 ----------
-        body = self._card(root, "编码设置")
-        r = ctk.CTkFrame(body, fg_color="transparent")
+        self.sec_enc = Section(root, "编码设置")
+        self.sec_enc.grid(row=3, column=0, sticky="ew", padx=20, pady=4)
+        r = ctk.CTkFrame(self.sec_enc.body, fg_color="transparent")
         r.pack(fill="x", pady=2)
         ctk.CTkLabel(r, text="编码器", width=64, anchor="w", font=F_LABEL,
                      text_color=C_TEXT).pack(side="left")
         self.var_encoder = ctk.StringVar(value=self.cfg.get("encoder", ENCODERS[0][0]))
-        self._menu(r, self.var_encoder, [x[0] for x in ENCODERS], 250).pack(side="left", padx=(8, 24))
+        self._menu(r, self.var_encoder, [x[0] for x in ENCODERS],
+                   240).pack(side="left", padx=(8, 20))
         ctk.CTkLabel(r, text="速度", width=40, anchor="w", font=F_LABEL,
                      text_color=C_TEXT).pack(side="left")
         self.var_speed = ctk.StringVar(value=self.cfg.get("speed", SPEEDS[0][0]))
         self._menu(r, self.var_speed, [x[0] for x in SPEEDS], 120).pack(side="left", padx=8)
-
-        r = ctk.CTkFrame(body, fg_color="transparent")
+        r = ctk.CTkFrame(self.sec_enc.body, fg_color="transparent")
         r.pack(fill="x", pady=2)
         ctk.CTkLabel(r, text="质量模式", width=64, anchor="w", font=F_LABEL,
                      text_color=C_TEXT).pack(side="left")
         self.var_rc = ctk.StringVar(value=self.cfg.get("rc", RC_MODES[0][0]))
-        self._menu(r, self.var_rc, [x[0] for x in RC_MODES], 160,
-                   self._on_rc_change).pack(side="left", padx=(8, 24))
+        self._menu(r, self.var_rc, [x[0] for x in RC_MODES], 150,
+                   self._on_rc_change).pack(side="left", padx=(8, 20))
         ctk.CTkLabel(r, text="质量", width=40, anchor="w", font=F_LABEL,
                      text_color=C_TEXT).pack(side="left")
         self.var_qp = ctk.StringVar(value=self.cfg.get("qp", QP_LEVELS[0][0]))
-        self.menu_qp = self._menu(r, self.var_qp, [x[0] for x in QP_LEVELS], 200)
-        self.menu_qp.pack(side="left", padx=8)
-        ctk.CTkLabel(r, text="目标码率(M)", width=76, anchor="w", font=F_LABEL,
-                     text_color=C_TEXT).pack(side="left", padx=(16, 0))
+        self.menu_qp = self._menu(r, self.var_qp, [x[0] for x in QP_LEVELS], 190)
+        self.menu_qp.pack(side="left", padx=(8, 20))
+        ctk.CTkLabel(r, text="码率(M)", width=56, anchor="w", font=F_LABEL,
+                     text_color=C_TEXT).pack(side="left")
         self.var_bitrate = ctk.StringVar(value=str(self.cfg.get("bitrate", 20)))
-        self.entry_bitrate = ctk.CTkEntry(r, textvariable=self.var_bitrate, width=64,
+        self.entry_bitrate = ctk.CTkEntry(r, textvariable=self.var_bitrate, width=60,
                                           fg_color=C_INPUT, border_color=C_BORDER,
                                           text_color=C_TEXT, corner_radius=6)
         self.entry_bitrate.pack(side="left", padx=8)
 
         # ---------- 音频 ----------
-        body = self._card(root, "音频")
-        r = ctk.CTkFrame(body, fg_color="transparent")
+        self.sec_aud = Section(root, "音频")
+        self.sec_aud.grid(row=4, column=0, sticky="ew", padx=20, pady=4)
+        r = ctk.CTkFrame(self.sec_aud.body, fg_color="transparent")
         r.pack(fill="x", pady=2)
         ctk.CTkLabel(r, text="主音轨", width=64, anchor="w", font=F_LABEL,
                      text_color=C_TEXT).pack(side="left")
         self.var_track = ctk.StringVar(value="自动（英语优先，最高声道）")
         self.menu_track = self._menu(r, self.var_track,
-                                     ["自动（英语优先，最高声道）"], 300)
-        self.menu_track.pack(side="left", padx=(8, 24))
+                                     ["自动（英语优先，最高声道）"], 290)
+        self.menu_track.pack(side="left", padx=(8, 20))
         ctk.CTkLabel(r, text="音频输出", width=64, anchor="w", font=F_LABEL,
                      text_color=C_TEXT).pack(side="left")
         self.var_audio = ctk.StringVar(value=self.cfg.get("audio", AUDIO_MODES[0][0]))
-        self._menu(r, self.var_audio, [x[0] for x in AUDIO_MODES], 220).pack(side="left", padx=8)
+        self._menu(r, self.var_audio, [x[0] for x in AUDIO_MODES], 210).pack(side="left", padx=8)
 
         # ---------- 高级 ----------
-        body = self._card(root, "高级")
-        r = ctk.CTkFrame(body, fg_color="transparent")
+        self.sec_adv = Section(root, "高级")
+        self.sec_adv.grid(row=5, column=0, sticky="ew", padx=20, pady=4)
+        r = ctk.CTkFrame(self.sec_adv.body, fg_color="transparent")
         r.pack(fill="x", pady=2)
         ctk.CTkLabel(r, text="关键帧间隔", width=76, anchor="w", font=F_LABEL,
                      text_color=C_TEXT).pack(side="left")
         self.var_gop = ctk.StringVar(value=str(self.cfg.get("gop", 96)))
-        ctk.CTkEntry(r, textvariable=self.var_gop, width=64, fg_color=C_INPUT,
+        ctk.CTkEntry(r, textvariable=self.var_gop, width=60, fg_color=C_INPUT,
                      border_color=C_BORDER, text_color=C_TEXT, corner_radius=6
-                     ).pack(side="left", padx=(8, 24))
+                     ).pack(side="left", padx=(8, 20))
         self.var_open = ctk.BooleanVar(value=self.cfg.get("open_after", True))
         ctk.CTkCheckBox(r, text="完成后打开输出目录", variable=self.var_open,
                         fg_color=C_ACCENT, hover_color=C_ACCENT_H, text_color=C_DIM,
                         font=F_LABEL, checkbox_width=20, checkbox_height=20
-                        ).pack(side="left", padx=(0, 24))
+                        ).pack(side="left", padx=(0, 20))
         ctk.CTkLabel(r, text="限制帧数（调试）", font=F_LABEL, text_color=C_DIM
                      ).pack(side="left")
         self.var_frames = ctk.StringVar(value="")
-        ctk.CTkEntry(r, textvariable=self.var_frames, width=80, fg_color=C_INPUT,
+        ctk.CTkEntry(r, textvariable=self.var_frames, width=70, fg_color=C_INPUT,
                      border_color=C_BORDER, text_color=C_TEXT, corner_radius=6
                      ).pack(side="left", padx=8)
 
-        # ---------- 操作按钮 ----------
+        # ---------- 按钮 ----------
         btns = ctk.CTkFrame(root, fg_color="transparent")
-        btns.pack(fill="x", padx=20, pady=(10, 4))
+        btns.grid(row=6, column=0, sticky="ew", padx=20, pady=(10, 4))
         self.btn_start = ctk.CTkButton(
             btns, text="开始转换", command=self.start, width=130, height=36,
             fg_color=C_ACCENT, hover_color=C_ACCENT_H, text_color="#ffffff",
             font=F_BTN, corner_radius=8)
         self.btn_start.pack(side="left")
         self.btn_cancel = ctk.CTkButton(
-            btns, text="取消", command=self.cancel, width=90, height=36,
+            btns, text="取消", command=self.cancel, width=86, height=36,
             fg_color=C_BTN2, hover_color=C_BTN2_H, text_color=C_TEXT,
             font=F_LABEL, corner_radius=8, state="disabled")
         self.btn_cancel.pack(side="left", padx=10)
         ctk.CTkButton(
-            btns, text="无损拼接 MKV", command=self.concat, width=130, height=36,
+            btns, text="无损拼接 MKV", command=self.concat, width=126, height=36,
             fg_color="transparent", hover_color=C_BTN2, text_color=C_DIM,
             border_width=1, border_color=C_BORDER, font=F_LABEL, corner_radius=8
         ).pack(side="right")
 
         # ---------- 进度 ----------
-        body = self._card(root, "进度")
+        card = ctk.CTkFrame(root, fg_color=C_CARD, corner_radius=10,
+                            border_width=1, border_color=C_BORDER)
+        card.grid(row=7, column=0, sticky="ew", padx=20, pady=4)
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.pack(fill="x", padx=14, pady=10)
         head = ctk.CTkFrame(body, fg_color="transparent")
         head.pack(fill="x")
         self.lbl_pct = ctk.CTkLabel(head, text="0.0%", font=F_BIG, text_color=C_TEXT)
         self.lbl_pct.pack(side="left")
         self.lbl_stage = ctk.CTkLabel(head, text="就绪", font=F_LABEL, text_color=C_DIM)
-        self.lbl_stage.pack(side="left", padx=(16, 0), pady=(8, 0))
-        self.pb = ctk.CTkProgressBar(body, height=10, progress_color=C_ACCENT,
-                                     fg_color=C_INPUT, corner_radius=5)
+        self.lbl_stage.pack(side="left", padx=(14, 0), pady=(7, 0))
+        self.pb = ctk.CTkProgressBar(body, height=8, progress_color=C_ACCENT,
+                                     fg_color=C_INPUT, corner_radius=4)
         self.pb.set(0)
-        self.pb.pack(fill="x", pady=(8, 4))
-        self.lbl_stat = ctk.CTkLabel(body, text=" ", font=F_LABEL, text_color=C_DIM,
+        self.pb.pack(fill="x", pady=(7, 3))
+        self.lbl_stat = ctk.CTkLabel(body, text=" ", font=F_SMALL, text_color=C_FAINT,
                                      anchor="w")
         self.lbl_stat.pack(fill="x")
 
         # ---------- 日志 ----------
-        body = self._card(root, "日志", expand=True)
-        self.log = ctk.CTkTextbox(body, height=120, font=F_MONO, fg_color=C_LOG_BG,
+        card = ctk.CTkFrame(root, fg_color=C_CARD, corner_radius=10,
+                            border_width=1, border_color=C_BORDER)
+        card.grid(row=8, column=0, sticky="nsew", padx=20, pady=(4, 14))
+        ctk.CTkLabel(card, text="日志", font=F_CARDT, text_color=C_DIM
+                     ).pack(anchor="w", padx=14, pady=(8, 2))
+        self.log = ctk.CTkTextbox(card, font=F_MONO, fg_color=C_LOG_BG,
                                   text_color="#c8cad2", corner_radius=6,
                                   border_width=1, border_color=C_BORDER,
                                   scrollbar_button_color="#3a3d46")
-        self.log.pack(fill="both", expand=True)
+        self.log.pack(fill="both", expand=True, padx=14, pady=(0, 12))
         self.log.configure(state="disabled")
 
+        # 摘要联动
+        for v in (self.var_layout, self.var_container):
+            v.trace_add("write", lambda *a: self._refresh_summaries())
+        for v in (self.var_encoder, self.var_speed, self.var_rc, self.var_qp):
+            v.trace_add("write", lambda *a: self._refresh_summaries())
+        for v in (self.var_track, self.var_audio):
+            v.trace_add("write", lambda *a: self._refresh_summaries())
+        for v in (self.var_gop, self.var_open):
+            v.trace_add("write", lambda *a: self._refresh_summaries())
+
         self._on_rc_change(self.var_rc.get())
-        self._on_container_change(self.var_container.get())
+        self._refresh_summaries()
         self.logline("就绪。选择 .mpls 源文件与输出路径后点击「开始转换」。")
 
     # ---------- UI 工具 ----------
-    def _card(self, parent, title, expand=False):
-        card = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=10,
-                            border_width=1, border_color=C_BORDER)
-        card.pack(fill="both" if expand else "x", expand=expand, padx=20, pady=4)
-        ctk.CTkLabel(card, text=title, font=F_CARDT, text_color=C_DIM
-                     ).pack(anchor="w", padx=14, pady=(8, 3))
-        body = ctk.CTkFrame(card, fg_color="transparent")
-        body.pack(fill="both" if expand else "x", expand=expand,
-                  padx=14, pady=(0, 10))
-        return body
+    def _refresh_summaries(self):
+        short = lambda s: s.split("  ")[0]
+        self.sec_fmt.set_summary("%s · %s" % (
+            short(self.var_layout.get()),
+            self.var_container.get().split("（")[0]))
+        enc = "GPU" if self.var_encoder.get() == ENCODERS[0][0] else "CPU"
+        self.sec_enc.set_summary("%s · %s · %s" % (
+            enc, self.var_qp.get().split("（")[0], self.var_speed.get()))
+        self.sec_aud.set_summary("%s · %s" % (
+            self.var_track.get().split("（")[0],
+            self.var_audio.get().split("（")[0]))
+        self.sec_adv.set_summary("GOP %s%s" % (
+            self.var_gop.get(), " · 完成后打开" if self.var_open.get() else ""))
 
     def _menu(self, parent, var, values, width, command=None):
         return ctk.CTkOptionMenu(
@@ -712,22 +798,20 @@ class App:
                       fg_color=C_BTN2, hover_color=C_BTN2_H, text_color=C_TEXT,
                       font=F_LABEL, corner_radius=6).pack(side="left")
         if hint:
-            ctk.CTkLabel(parent, text=hint, font=F_SMALL, text_color="#6b6d78",
+            ctk.CTkLabel(parent, text=hint, font=F_SMALL, text_color=C_FAINT,
                          anchor="w").pack(fill="x", padx=(64, 0), pady=(0, 2))
 
     def _on_rc_change(self, value):
         is_cqp = value == RC_MODES[0][0]
         self.menu_qp.configure(state="normal" if is_cqp else "disabled")
         self.entry_bitrate.configure(state="disabled" if is_cqp else "normal")
+        self._refresh_summaries()
 
     def _on_container_change(self, value):
         if value == CONTAINERS[1][0]:  # MP4
             cur = self.var_out.get()
             if cur and cur.lower().endswith(".mkv"):
                 self.var_out.set(os.path.splitext(cur)[0] + ".mp4")
-
-    def _on_layout_change(self, value):
-        pass
 
     # ---------- 配置 ----------
     def _load_cfg(self):
@@ -854,8 +938,7 @@ class App:
         self.lbl_stage.configure(text="准备中")
         self.logline("开始任务：%s" % os.path.basename(mpls))
         self.logline("布局 %s · 容器 %s · 编码器 %s" % (
-            self.var_layout.get().split("  ")[0],
-            container.upper(),
+            self.var_layout.get().split("  ")[0], container.upper(),
             "GPU" if self.var_encoder.get() == ENCODERS[0][0] else "CPU"))
         self.job = ConvertJob(
             mpls, out,
