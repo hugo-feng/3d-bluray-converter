@@ -120,54 +120,90 @@ def icon_pixmap(name, size=16):
     return None
 
 
-QSS_TEMPLATE = """
-QWidget { color: #e8e9ed;
+THEMES = {
+    "dark": dict(
+        bg="#17181c", card="#202127", border="#2e3038", text="#e8e9ed",
+        dim="#9a9ca8", faint="#6b6d78", input="#2a2c34", input_border="#2e3038",
+        accent="#3574f0", accent_h="#2b5fd0", btn="#33363e", btn_h="#3d4149",
+        disabled_bg="#24262c", log_bg="#121317", log_fg="#c8cad2",
+        hover="#26272e", chk_border="#3d4149",
+        chev_right="chevron-right.svg", chev_down="chevron-down.svg",
+        theme_icon="sun.svg"),
+    "light": dict(
+        bg="#f3f3f3", card="#ffffff", border="#e4e4e4", text="#1b1b1b",
+        dim="#5f6368", faint="#8a8d93", input="#ffffff", input_border="#d6d6d6",
+        accent="#3574f0", accent_h="#2b5fd0", btn="#f5f5f5", btn_h="#ebebeb",
+        disabled_bg="#eeeeee", log_bg="#fafafa", log_fg="#333333",
+        hover="#ededed", chk_border="#c0c0c0",
+        chev_right="chevron-right-light.svg", chev_down="chevron-down-light.svg",
+        theme_icon="moon.svg"),
+}
+
+QSS_TMPL = """
+QWidget { color: @TEXT@;
           font-family: "Microsoft YaHei UI"; font-size: 10.5pt; }
-#mainwin { background: #17181c; }
-QScrollArea { border: none; background: #17181c; }
-#scrollcontent { background: #17181c; }
-QFrame#card { background: #202127; border: 1px solid #2e3038; border-radius: 8px; }
+#mainwin { background: @BG@; }
+QScrollArea { border: none; background: @BG@; }
+#scrollcontent { background: @BG@; }
+QFrame#card { background: @CARD@; border: 1px solid @BORDER@; border-radius: 8px; }
 QLabel { background: transparent; }
-QLineEdit { background: #2a2c34; border: 1px solid #2e3038; border-radius: 6px;
-            padding: 5px 8px; color: #e8e9ed; }
-QLineEdit:focus { border: 1px solid #3574f0; }
-QLineEdit:disabled { color: #6b6d78; background: #24262c; }
-QComboBox { background: #2a2c34; border: 1px solid #2e3038; border-radius: 6px;
-            padding: 4px 30px 4px 8px; color: #e8e9ed; }
-QComboBox:hover { border: 1px solid #3d4149; }
-QComboBox:focus { border: 1px solid #3574f0; }
-QComboBox:disabled { color: #6b6d78; background: #24262c; }
+#sectionhead { background: transparent; border-radius: 6px; }
+#sectionhead:hover { background: @HOVER@; }
+#sectiontitle { font-weight: 600; color: @TEXT@; }
+#sectiondesc { color: @FAINT@; }
+#dimlabel { color: @DIM@; }
+#faintlabel { color: @FAINT@; font-size: 9.5pt; }
+#themebtn { background: transparent; border: none; border-radius: 6px; padding: 4px; }
+#themebtn:hover { background: @HOVER@; }
+QLineEdit { background: @INPUT@; border: 1px solid @INPUT_BORDER@; border-radius: 6px;
+            padding: 5px 8px; color: @TEXT@; }
+QLineEdit:focus { border: 1px solid @ACCENT@; }
+QLineEdit:disabled { color: @FAINT@; background: @DISABLED_BG@; }
+QComboBox { background: @INPUT@; border: 1px solid @INPUT_BORDER@; border-radius: 6px;
+            padding: 4px 30px 4px 8px; color: @TEXT@; }
+QComboBox:hover { border: 1px solid @DIM@; }
+QComboBox:focus { border: 1px solid @ACCENT@; }
+QComboBox:disabled { color: @FAINT@; background: @DISABLED_BG@; }
 QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center right;
                        width: 26px; border: none; background: transparent; }
-QComboBox::down-arrow { image: url("<ICONS>/chevron-down.svg");
-                        width: 16px; height: 16px; }
-QComboBox QAbstractItemView { background: #202127; border: 1px solid #2e3038;
-            selection-background-color: #3574f0; outline: none; color: #e8e9ed;
+QComboBox::down-arrow { image: url("@ICONS@/@CHEV_DOWN@"); width: 16px; height: 16px; }
+QComboBox QAbstractItemView { background: @CARD@; border: 1px solid @BORDER@;
+            selection-background-color: @ACCENT@; outline: none; color: @TEXT@;
             padding: 4px; }
-QPushButton { background: #33363e; border: 1px solid #2e3038; border-radius: 6px;
-              padding: 6px 14px; color: #e8e9ed; }
-QPushButton:hover { background: #3d4149; }
-QPushButton:disabled { color: #6b6d78; }
-QPushButton#accent { background: #3574f0; border: 1px solid #3574f0;
+QPushButton { background: @BTN@; border: 1px solid @BORDER@; border-radius: 6px;
+              padding: 6px 14px; color: @TEXT@; }
+QPushButton:hover { background: @BTN_H@; }
+QPushButton:disabled { color: @FAINT@; }
+QPushButton#accent { background: @ACCENT@; border: 1px solid @ACCENT@;
                      color: #ffffff; font-weight: 600; }
-QPushButton#accent:hover { background: #2b5fd0; }
+QPushButton#accent:hover { background: @ACCENT_H@; }
 QPushButton#accent:disabled { background: #2b3f66; border-color: #2b3f66;
                               color: #9aa5b8; }
-QProgressBar { background: #2e3038; border: none; border-radius: 4px; }
-QProgressBar::chunk { background: #3574f0; border-radius: 4px; }
-QCheckBox { color: #c9cbd3; spacing: 8px; }
+QProgressBar { background: @BORDER@; border: none; border-radius: 4px; }
+QProgressBar::chunk { background: @ACCENT@; border-radius: 4px; }
+QCheckBox { color: @DIM@; spacing: 8px; }
 QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px;
-                       border: 1px solid #3d4149; background: #2a2c34; }
-QCheckBox::indicator:checked { background: #3574f0; border-color: #3574f0; }
-QCheckBox::indicator:hover { border-color: #3574f0; }
-QPlainTextEdit { background: #121317; border: 1px solid #2e3038; border-radius: 6px;
-                 color: #c8cad2; padding: 6px; }
-QScrollBar:vertical { background: #17181c; width: 12px; margin: 0; }
-QScrollBar::handle:vertical { background: #3a3d46; border-radius: 6px; min-height: 36px; }
-QScrollBar::handle:vertical:hover { background: #4a4e58; }
+                       border: 1px solid @CHK_BORDER@; background: @INPUT@; }
+QCheckBox::indicator:checked { background: @ACCENT@; border-color: @ACCENT@;
+                               image: url("@ICONS@/check.svg"); }
+QCheckBox::indicator:hover { border-color: @ACCENT@; }
+QPlainTextEdit { background: @LOG_BG@; border: 1px solid @BORDER@; border-radius: 6px;
+                 color: @LOG_FG@; padding: 6px; }
+QScrollBar:vertical { background: @BG@; width: 12px; margin: 0; }
+QScrollBar::handle:vertical { background: @DIM@; border-radius: 6px; min-height: 36px; }
+QScrollBar::handle:vertical:hover { background: @TEXT@; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
 """
+
+
+def build_qss(theme, icons_dir):
+    """按主题生成完整样式表（@TOKEN@ 占位符替换）"""
+    colors = dict(THEMES.get(theme, THEMES["dark"]))
+    qss = QSS_TMPL.replace("@ICONS@", icons_dir.replace("\\", "/"))
+    for k, v in colors.items():
+        qss = qss.replace("@%s@" % k.upper(), v)
+    return qss
 
 
 class Cancelled(Exception):
@@ -726,36 +762,39 @@ class Bridge(QObject):
     error = Signal(str)
 
 
+class NoWheelComboBox(QComboBox):
+    """下拉框忽略滚轮（滚动时滚动页面而不是改变选项）"""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class Section(QFrame):
-    """可折叠设置区（Qt 版）"""
+    """可折叠设置区（Win11 Expander 风格：悬停高亮、圆角）"""
 
     def __init__(self, title, parent=None):
         super().__init__(parent)
         self.setObjectName("card")
-        self.setCursor(Qt.PointingHandCursor)
         self._expanded = False
         self._summary = ""
+        self._theme = "dark"
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 6, 14, 8)
+        lay.setContentsMargins(10, 6, 10, 8)
         lay.setSpacing(8)
 
         self._head = QWidget()
+        self._head.setObjectName("sectionhead")
+        self._head.setAttribute(Qt.WA_StyledBackground, True)
         self._head.setCursor(Qt.PointingHandCursor)
         h = QHBoxLayout(self._head)
-        h.setContentsMargins(0, 3, 0, 3)
+        h.setContentsMargins(8, 4, 8, 4)
         self._arrow = QLabel()
         self._arrow.setFixedWidth(18)
-        _pm = icon_pixmap("chevron-right.svg", 16)
-        if _pm is not None:
-            self._arrow.setPixmap(_pm)
-        else:
-            self._arrow.setText("›")
-            self._arrow.setStyleSheet("color:#9a9ca8;")
         self._title = QLabel(title)
-        self._title.setStyleSheet("font-weight:600;")
+        self._title.setObjectName("sectiontitle")
         self._sum = QLabel("")
-        self._sum.setStyleSheet("color:#6b6d78;")
+        self._sum.setObjectName("sectiondesc")
         h.addWidget(self._arrow)
         h.addWidget(self._title)
         h.addStretch(1)
@@ -765,12 +804,29 @@ class Section(QFrame):
         self.body = QWidget()
         self.body_outer = lay
         self.body_layout = QVBoxLayout(self.body)
-        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setContentsMargins(8, 0, 8, 0)
         self.body_layout.setSpacing(6)
         self.body.setVisible(False)
         lay.addWidget(self.body)
 
         self._head.mousePressEvent = self._on_click
+        self.refresh_icon()
+
+    def _icon_name(self, base):
+        return base + (".svg" if self._theme == "dark" else "-light.svg")
+
+    def refresh_icon(self):
+        name = self._icon_name("chevron-down" if self._expanded
+                               else "chevron-right")
+        _pm = icon_pixmap(name, 16)
+        if _pm is not None:
+            self._arrow.setPixmap(_pm)
+        else:
+            self._arrow.setText("⌄" if self._expanded else "›")
+
+    def set_theme(self, theme):
+        self._theme = theme
+        self.refresh_icon()
 
     def _on_click(self, event):
         self.toggle()
@@ -778,12 +834,7 @@ class Section(QFrame):
 
     def toggle(self):
         self._expanded = not self._expanded
-        _pm = icon_pixmap("chevron-down.svg" if self._expanded
-                          else "chevron-right.svg", 16)
-        if _pm is not None:
-            self._arrow.setPixmap(_pm)
-        else:
-            self._arrow.setText("⌄" if self._expanded else "›")
+        self.refresh_icon()
         self.body.setVisible(self._expanded)
         self._sum.setText("" if self._expanded else self._summary)
 
@@ -797,6 +848,7 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.cfg = self._load_cfg()
+        self._theme = self.cfg.get("theme", "dark")
         self.job = None
         self.audio_tracks = []
         self.bridge = Bridge()
@@ -837,10 +889,17 @@ class MainWindow(QWidget):
         t.setStyleSheet("font-size:16pt; font-weight:700;")
         top.addWidget(t)
         v = QLabel(APP_VERSION)
-        v.setStyleSheet("color:#6b6d78;")
+        v.setObjectName("faintlabel")
         top.addWidget(v)
         top.addStretch(1)
         top.addWidget(QLabel("3D 蓝光双流 → SBS / TAB · GPU 硬件加速"))
+        self.btn_theme = QPushButton()
+        self.btn_theme.setObjectName("themebtn")
+        self.btn_theme.setFixedSize(34, 30)
+        self.btn_theme.setCursor(Qt.PointingHandCursor)
+        self.btn_theme.setToolTip("切换深色 / 浅色主题")
+        self.btn_theme.clicked.connect(self._toggle_theme)
+        top.addWidget(self.btn_theme)
         root.addLayout(top)
 
         # ---------- 源与输出 ----------
@@ -864,12 +923,12 @@ class MainWindow(QWidget):
         self.sec_fmt = Section("输出格式")
         r = QHBoxLayout()
         r.addWidget(QLabel("3D 布局"))
-        self.cmb_layout = QComboBox()
+        self.cmb_layout = NoWheelComboBox()
         self.cmb_layout.addItems([x[0] for x in LAYOUTS])
         self._set_combo(self.cmb_layout, self.cfg.get("layout", LAYOUTS[0][0]))
         r.addWidget(self.cmb_layout, 2)
         r.addWidget(QLabel("容器"))
-        self.cmb_container = QComboBox()
+        self.cmb_container = NoWheelComboBox()
         self.cmb_container.addItems([x[0] for x in CONTAINERS])
         self._set_combo(self.cmb_container, self.cfg.get("container", CONTAINERS[0][0]))
         r.addWidget(self.cmb_container, 2)
@@ -881,12 +940,12 @@ class MainWindow(QWidget):
         self.sec_enc = Section("编码设置")
         r = QHBoxLayout()
         r.addWidget(QLabel("编码器"))
-        self.cmb_encoder = QComboBox()
+        self.cmb_encoder = NoWheelComboBox()
         self.cmb_encoder.addItems([x[0] for x in ENCODERS])
         self._set_combo(self.cmb_encoder, self.cfg.get("encoder", ENCODERS[0][0]))
         r.addWidget(self.cmb_encoder, 2)
         r.addWidget(QLabel("速度"))
-        self.cmb_speed = QComboBox()
+        self.cmb_speed = NoWheelComboBox()
         self.cmb_speed.addItems([x[0] for x in SPEEDS])
         self._set_combo(self.cmb_speed, self.cfg.get("speed", SPEEDS[0][0]))
         r.addWidget(self.cmb_speed, 1)
@@ -894,12 +953,12 @@ class MainWindow(QWidget):
         self.sec_enc.body_layout.addLayout(r)
         r = QHBoxLayout()
         r.addWidget(QLabel("质量模式"))
-        self.cmb_rc = QComboBox()
+        self.cmb_rc = NoWheelComboBox()
         self.cmb_rc.addItems([x[0] for x in RC_MODES])
         self._set_combo(self.cmb_rc, self.cfg.get("rc", RC_MODES[0][0]))
         r.addWidget(self.cmb_rc, 1)
         r.addWidget(QLabel("质量"))
-        self.cmb_qp = QComboBox()
+        self.cmb_qp = NoWheelComboBox()
         self.cmb_qp.addItems([x[0] for x in QP_LEVELS])
         self._set_combo(self.cmb_qp, self.cfg.get("qp", QP_LEVELS[0][0]))
         r.addWidget(self.cmb_qp, 2)
@@ -915,11 +974,11 @@ class MainWindow(QWidget):
         self.sec_aud = Section("音频")
         r = QHBoxLayout()
         r.addWidget(QLabel("主音轨"))
-        self.cmb_track = QComboBox()
+        self.cmb_track = NoWheelComboBox()
         self.cmb_track.addItem("自动（英语优先，最高声道）")
         r.addWidget(self.cmb_track, 3)
         r.addWidget(QLabel("音频输出"))
-        self.cmb_audio = QComboBox()
+        self.cmb_audio = NoWheelComboBox()
         self.cmb_audio.addItems([x[0] for x in AUDIO_MODES])
         self._set_combo(self.cmb_audio, self.cfg.get("audio", AUDIO_MODES[0][0]))
         r.addWidget(self.cmb_audio, 2)
@@ -974,7 +1033,7 @@ class MainWindow(QWidget):
         self.lbl_pct.setStyleSheet("font-size:22pt; font-weight:700;")
         r.addWidget(self.lbl_pct)
         self.lbl_stage = QLabel("就绪")
-        self.lbl_stage.setStyleSheet("color:#9a9ca8;")
+        self.lbl_stage.setObjectName("dimlabel")
         r.addWidget(self.lbl_stage)
         r.addStretch(1)
         cv.addLayout(r)
@@ -985,7 +1044,7 @@ class MainWindow(QWidget):
         self.pb.setTextVisible(False)
         cv.addWidget(self.pb)
         self.lbl_stat = QLabel(" ")
-        self.lbl_stat.setStyleSheet("color:#6b6d78; font-size:9.5pt;")
+        self.lbl_stat.setObjectName("faintlabel")
         cv.addWidget(self.lbl_stat)
         root.addWidget(card)
 
@@ -996,7 +1055,7 @@ class MainWindow(QWidget):
         cv.setContentsMargins(14, 10, 14, 12)
         cv.setSpacing(6)
         lt = QLabel("日志")
-        lt.setStyleSheet("color:#9a9ca8; font-weight:600;")
+        lt.setObjectName("dimlabel")
         cv.addWidget(lt)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -1039,7 +1098,7 @@ class MainWindow(QWidget):
         row.addWidget(b)
         parent.addLayout(row)
         h = QLabel(hint)
-        h.setStyleSheet("color:#6b6d78; font-size:9.5pt;")
+        h.setObjectName("faintlabel")
         h.setContentsMargins(72, 0, 0, 4)
         parent.addWidget(h)
 
@@ -1054,6 +1113,36 @@ class MainWindow(QWidget):
         self.cmb_qp.setEnabled(is_cqp)
         self.le_bitrate.setEnabled(not is_cqp)
         self._refresh_summaries()
+
+    def _toggle_theme(self):
+        self._theme = "light" if self._theme == "dark" else "dark"
+        self._apply_theme()
+        self._save_cfg()
+
+    def _apply_theme(self):
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_qss(self._theme, ICONS_DIR))
+        pm = icon_pixmap(THEMES[self._theme]["theme_icon"], 18)
+        if pm is not None:
+            self.btn_theme.setIcon(QIcon(pm))
+            self.btn_theme.setIconSize(pm.size())
+        for sec in (self.sec_fmt, self.sec_enc, self.sec_aud, self.sec_adv):
+            sec.set_theme(self._theme)
+        self._apply_titlebar()
+
+    def _apply_titlebar(self):
+        """让 Windows 标题栏跟随主题"""
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            val = ctypes.c_int(0 if self._theme == "light" else 2)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.byref(val), ctypes.sizeof(val))
+        except Exception:
+            pass
 
     def _refresh_summaries(self):
         self.sec_fmt.set_summary("%s · %s" % (
@@ -1070,13 +1159,14 @@ class MainWindow(QWidget):
     # ---------- 配置 ----------
     def _load_cfg(self):
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception:
             return {}
 
     def _save_cfg(self):
-        cfg = {"left": self.le_left.text(), "right": self.le_right.text(),
+        cfg = {"theme": self._theme,
+               "left": self.le_left.text(), "right": self.le_right.text(),
                "out": self.le_out.text(), "layout": self.cmb_layout.currentText(),
                "container": self.cmb_container.currentText(),
                "encoder": self.cmb_encoder.currentText(),
@@ -1353,8 +1443,16 @@ def main():
     app = QApplication(sys.argv)
     # Fusion 风格：所有控件完全由 QSS 渲染（消除 Windows 原生风格与深色主题混杂）
     app.setStyle("Fusion")
-    app.setStyleSheet(QSS_TEMPLATE.replace("<ICONS>", ICONS_DIR.replace("\\", "/")))
+    theme = "dark"
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            theme = json.load(f).get("theme", "dark")
+    except Exception:
+        pass
+    app.setStyleSheet(build_qss(theme, ICONS_DIR))
     win = MainWindow()
+    win._theme = theme
+    win._apply_theme()
     win.show()
     if "--selftest" in args:
         def _check():
