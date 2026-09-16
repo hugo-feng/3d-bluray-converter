@@ -1287,6 +1287,8 @@ def main():
         job.run()
         return 0
     app = QApplication(sys.argv)
+    # Fusion 风格：所有控件完全由 QSS 渲染（消除 Windows 原生风格与深色主题混杂）
+    app.setStyle("Fusion")
     app.setStyleSheet(QSS_TEMPLATE.replace("<ICONS>", ICONS_DIR.replace("\\", "/")))
     win = MainWindow()
     win.show()
