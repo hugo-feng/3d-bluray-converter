@@ -103,6 +103,25 @@ powershell -ExecutionPolicy Bypass -File download_tools.ps1
 
 > 便携包内的 FFmpeg 位于 `bin/ffmpeg/master/` 与 `bin/ffmpeg/8.0/` 两个目录。
 
+## 第三方许可与合规
+
+本软件分发时包含以下第三方组件，其许可与源码获取方式如下：
+
+| 组件 | 许可 | 源码 / 许可获取 |
+|---|---|---|
+| FFmpeg（BtbN win64-gpl 构建） | GPL v3 | https://github.com/BtbN/FFmpeg-Builds · https://ffmpeg.org |
+| MKVToolNix（mkvmerge） | GPL v2 | https://mkvtoolnix.download · https://codeberg.org/mbunkus/mkvtoolnix |
+| AviSynth+ | GPL v2 | https://github.com/AviSynth/AviSynthPlus |
+| tsMuxeR | Apache-2.0 | https://github.com/justdan96/tsMuxer |
+| FRIMSource / libmfxsw（FRIM） | 免费工具（来源：BD3D2MK3D 发布包） | https://www.videohelp.com/software/BD3D2MK3D |
+| Python | PSF License | https://www.python.org |
+| Qt / PySide6 | LGPL v3（动态链接） | https://www.qt.io/licensing · https://doc.qt.io/qtforpython |
+| Tabler Icons | MIT | https://github.com/tabler/tabler-icons |
+
+- GPL 组件的完整源码可通过上表链接从上游获取；本项目未对上述组件进行任何修改。
+- Qt / PySide6 以**动态链接**方式使用：`_internal` 目录中的 Qt 动态库可被替换，符合 LGPL v3 的要求。
+- 如任何权利人对本项目的组件分发有异议，请通过仓库 Issue 联系，我们将立即处理。
+
 ## 命令行模式
 
 ```powershell
@@ -169,7 +188,7 @@ HEVC 视频（含原版音轨 + AAC 兼容轨）
   仅用于说明性目的。
 - **第三方组件**：本工具内置或依赖 ffmpeg、tsMuxeR、AviSynth+、FRIM (FRIMSource)、
   MKVToolNix、Qt / PySide6、Tabler Icons 等开源组件，其版权与许可归各自项目所有
-  （详见上文「工具链」章节）。
+  （许可详情与源码获取方式见上文「第三方许可与合规」章节）。
 
 ## 许可证
 
