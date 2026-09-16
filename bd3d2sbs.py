@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "BD3D 转换器"
-APP_VERSION = "v1.9.0"
+APP_VERSION = "v1.9.1"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -264,6 +264,14 @@ DEMUX_WEIGHT = 3.0
 VIDEO_WEIGHT = 88.0
 AUDIO_WEIGHT = 4.0
 MUX_WEIGHT = 5.0
+
+STAGE_NAMES = {
+    "demux": "解流中",
+    "encode": "编码中",
+    "audio": "音频提取",
+    "mux": "混流封装",
+    "done": "完成",
+}
 
 if getattr(sys, "frozen", False):
     _EXE_DIR = os.path.dirname(sys.executable)
@@ -1102,7 +1110,7 @@ def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
 class Bridge(QObject):
     """线程 -> UI 的信号桥"""
     log = Signal(str)
-    progress = Signal(float, str)
+    progress = Signal(str, float, str)
     done = Signal(str)
     error = Signal(str)
     concat_progress = Signal(float, str)
@@ -1303,7 +1311,7 @@ class MainWindow(QWidget):
         self.bridge.progress.connect(self._progress)
         self.bridge.done.connect(self._done)
         self.bridge.error.connect(self._fail)
-        self.bridge.concat_progress.connect(self._progress)
+        self.bridge.concat_progress.connect(self._concat_progress)
         self.bridge.concat_done.connect(self._concat_done)
         self.bridge.src_stats.connect(self._apply_src_stats)
         self.bridge.gpu_info.connect(self._apply_gpu_info)
@@ -1906,7 +1914,15 @@ class MainWindow(QWidget):
     def _log(self, s):
         self.log.appendPlainText(time.strftime("[%H:%M:%S] ") + s)
 
-    def _progress(self, pct, info):
+    def _progress(self, stage, pct, info):
+        self.pb.setValue(int(max(0.0, min(pct, 100.0)) * 10))
+        self.lbl_pct.setText("%.1f%%" % pct)
+        name = STAGE_NAMES.get(stage)
+        if name:
+            self.lbl_stage.setText(name)
+        self.lbl_stat.setText(info)
+
+    def _concat_progress(self, pct, info):
         self.pb.setValue(int(max(0.0, min(pct, 100.0)) * 10))
         self.lbl_pct.setText("%.1f%%" % pct)
         self.lbl_stat.setText(info)
@@ -2115,7 +2131,7 @@ class MainWindow(QWidget):
             gop=gop, audio_mode=audio_mode, audio_track=audio_track,
             open_after=self.chk_open.isChecked(), max_frames=max_frames,
             on_log=lambda s: self.bridge.log.emit(s),
-            on_progress=lambda st, pct, info: self.bridge.progress.emit(pct, info),
+            on_progress=lambda st, pct, info: self.bridge.progress.emit(st, pct, info),
             on_done=lambda o: self.bridge.done.emit(o),
             on_error=lambda e: self.bridge.error.emit(e))
         self.job.start()
