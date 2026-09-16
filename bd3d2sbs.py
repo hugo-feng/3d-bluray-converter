@@ -30,7 +30,7 @@ from PySide6.QtGui import QIcon, QFont
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QProgressBar, QLabel, QComboBox, QCheckBox, QPlainTextEdit, QFrame,
-    QFileDialog, QMessageBox)
+    QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "BD3D 转换器"
 APP_VERSION = "v1.7"
@@ -602,6 +602,7 @@ class ConvertJob(threading.Thread):
                    "-map", "0:a:%d" % audio_idx] + aopts + [apath]
             p = popen_hidden(cmd)
             self.proc = p
+            t_a = time.time()
             for line in p.stdout:
                 self._check()
                 line = line.strip()
@@ -611,9 +612,14 @@ class ConvertJob(threading.Thread):
                     except ValueError:
                         continue
                     frac = min(sec / max(dur, 1), 1.0)
+                    speed = sec / max(time.time() - t_a, 0.001)
+                    remain = (dur - sec) / speed if speed > 0.01 else 0
                     pct = base_pct + (ai + frac) / len(extract_jobs) * AUDIO_WEIGHT
-                    self.on_progress("audio", pct, "音频提取 %d/%d" % (
-                        ai + 1, len(extract_jobs)))
+                    self.on_progress(
+                        "audio", pct,
+                        "音频提取 %d/%d · %.0f%% · 剩余约 %s" % (
+                            ai + 1, len(extract_jobs), frac * 100,
+                            fmt_time(remain)))
                 elif line.startswith("progress=") and line.endswith("end"):
                     break
                 elif "=" not in line and line:
@@ -649,6 +655,7 @@ class ConvertJob(threading.Thread):
         p = popen_hidden(cmd)
         self.proc = p
         base_pct = DEMUX_WEIGHT + VIDEO_WEIGHT + AUDIO_WEIGHT
+        t_m = time.time()
         for line in p.stdout:
             self._check()
             line = line.strip()
@@ -658,8 +665,12 @@ class ConvertJob(threading.Thread):
                 except ValueError:
                     continue
                 frac = min(sec / max(dur, 1), 1.0)
+                speed = sec / max(time.time() - t_m, 0.001)
+                remain = (dur - sec) / speed if speed > 0.01 else 0
                 pct = base_pct + frac * MUX_WEIGHT
-                self.on_progress("mux", pct, "混流封装中 %.0f%%" % (frac * 100))
+                self.on_progress(
+                    "mux", pct, "混流封装中 %.0f%% · 剩余约 %s" % (
+                        frac * 100, fmt_time(remain)))
             elif line.startswith("progress=") and line.endswith("end"):
                 break
             elif "=" not in line and line:
@@ -801,7 +812,22 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-        root = QVBoxLayout(self)
+        # ---------- 滚动容器：展开折叠区时向下延伸，不挤压其它控件 ----------
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: #17181c; }")
+        outer.addWidget(scroll)
+        content = QWidget()
+        content.setObjectName("scrollcontent")
+        content.setStyleSheet("background: #17181c;")
+        scroll.setWidget(content)
+
+        root = QVBoxLayout(content)
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(8)
 
@@ -975,8 +1001,9 @@ class MainWindow(QWidget):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
-        cv.addWidget(self.log, 1)
-        root.addWidget(card, 1)
+        self.log.setFixedHeight(200)
+        cv.addWidget(self.log)
+        root.addWidget(card)
 
         # 联动摘要
         for cb in (self.cmb_layout, self.cmb_container, self.cmb_encoder,
@@ -1211,10 +1238,30 @@ class MainWindow(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.lbl_stage.setText("准备中")
-        self._log("开始任务：%s" % os.path.basename(left))
-        self._log("布局 %s · 容器 %s · 编码器 %s" % (
-            self.cmb_layout.currentText().split("  ")[0], container.upper(),
-            "GPU" if self.cmb_encoder.currentText() == ENCODERS[0][0] else "CPU"))
+        self._log("========== 任务参数 ==========")
+        self._log("左眼源文件：%s" % left)
+        self._log("右眼源文件：%s" % right)
+        self._log("输出文件：%s" % out)
+        self._log("3D 布局：%s" % self.cmb_layout.currentText())
+        self._log("输出容器：%s" % self.cmb_container.currentText())
+        self._log("编码器：%s" % self.cmb_encoder.currentText())
+        self._log("编码速度：%s" % self.cmb_speed.currentText())
+        self._log("质量模式：%s" % self.cmb_rc.currentText())
+        if self.cmb_rc.currentText() == RC_MODES[0][0]:
+            self._log("质量档位：%s（CQP %d / %d）" % (
+                self.cmb_qp.currentText(), qp, qp + 2))
+        else:
+            self._log("目标码率：%d Mbps" % bitrate)
+        self._log("关键帧间隔：%d" % gop)
+        if self.cmb_track.currentIndex() > 0:
+            self._log("主音轨：%s" % self.cmb_track.currentText())
+        else:
+            self._log("主音轨：自动（英语优先，最高声道）")
+        self._log("音频输出：%s" % self.cmb_audio.currentText())
+        if max_frames:
+            self._log("限制帧数：%d（调试模式）" % max_frames)
+        self._log("完成后打开目录：%s" % ("是" if self.chk_open.isChecked() else "否"))
+        self._log("=============================")
         self.job = ConvertJob(
             left, right, out,
             layout=self._sel(LAYOUTS, self.cmb_layout.currentText(), "full_sbs"),
