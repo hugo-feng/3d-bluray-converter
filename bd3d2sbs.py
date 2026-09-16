@@ -568,6 +568,20 @@ class App:
         self.lbl_stat.configure(text=info)
 
     # ---------- 任务 ----------
+    def _check_disk_space(self, out):
+        try:
+            import shutil
+            total, used, free = shutil.disk_usage(os.path.dirname(os.path.abspath(out)))
+            need = 45 * 1024 ** 3
+            if free < need:
+                return messagebox.askyesno(
+                    APP_TITLE,
+                    "输出目录所在磁盘剩余空间为 %.1f GB，低于建议值 45 GB。\n"
+                    "转换过程可能因空间不足而失败，是否仍要继续？" % (free / 1024 ** 3))
+        except Exception:
+            pass
+        return True
+
     def start(self):
         if self.job and self.job.is_alive():
             return
@@ -578,6 +592,8 @@ class App:
             return
         if not out:
             messagebox.showerror(APP_TITLE, "请选择输出文件路径")
+            return
+        if not self._check_disk_space(out):
             return
         qname = self.var_q.get()
         qp_i, qp_p = next(((a, b) for n, a, b in QUALITY_PRESETS if n == qname),
