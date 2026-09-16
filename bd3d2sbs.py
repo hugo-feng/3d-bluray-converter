@@ -59,8 +59,32 @@ F_LABEL = ("Microsoft YaHei UI", 11)
 F_BTN = ("Microsoft YaHei UI", 11, "bold")
 F_BIG = ("Microsoft YaHei UI", 22, "bold")
 F_SMALL = ("Microsoft YaHei UI", 10)
-F_MONO = ("Consolas", 10)
+F_MONO = ("Microsoft YaHei UI", 10)
 F_ARROW = ("Segoe UI Symbol", 11)
+
+
+def apply_font_scale(root):
+    """按屏幕 DPI 以像素为单位重算全局字体。
+    负值字号 = 像素单位，避免 tk scaling 的非整数缩放导致的渲染发虚/粗细不均、
+    以及大窗口下的布局异常。所有字体统一用微软雅黑（中英文渲染一致）。"""
+    global F_TITLE, F_CARDT, F_LABEL, F_BTN, F_BIG, F_SMALL, F_MONO, F_ARROW
+    try:
+        k = root.winfo_fpixels("1i") / 96.0
+    except Exception:
+        k = 1.0
+
+    def px(v):
+        return max(9, int(round(v * k)))
+
+    ui = "Microsoft YaHei UI"
+    F_TITLE = (ui, -px(20), "bold")
+    F_CARDT = (ui, -px(14), "bold")
+    F_LABEL = (ui, -px(14))
+    F_BTN = (ui, -px(14), "bold")
+    F_BIG = (ui, -px(30), "bold")
+    F_SMALL = (ui, -px(13))
+    F_MONO = (ui, -px(14))
+    F_ARROW = ("Segoe UI Symbol", -px(14))
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -918,7 +942,27 @@ class App:
                 pywinstyles.apply_style(self.root, "dark")
             except Exception:
                 pass
+        self._enable_double_buffer()
         self.logline("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
+
+    def _enable_double_buffer(self):
+        """Windows 双缓冲（WS_EX_COMPOSITED）：消除最大化/缩放时的整窗重绘闪烁"""
+        if os.name != "nt" or os.environ.get("BD3D_NO_COMPOSITED") == "1":
+            return
+        try:
+            import ctypes
+            self.root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            user32 = ctypes.windll.user32
+            GWL_EXSTYLE = -20
+            WS_EX_COMPOSITED = 0x02000000
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_COMPOSITED)
+            # 让扩展样式立即生效（需要一次窗口刷新）
+            self.root.withdraw()
+            self.root.after(20, self.root.deiconify)
+        except Exception:
+            pass
 
     # ---------- 主题 ----------
     def _set_dark_titlebar(self):
@@ -939,7 +983,7 @@ class App:
                 pass
 
     def _init_style(self):
-        if sv_ttk is not None:
+        if sv_ttk is not None and os.environ.get("BD3D_NO_SVTTK") != "1":
             try:
                 sv_ttk.set_theme("dark")
             except Exception:
@@ -1250,12 +1294,23 @@ def main():
         skipdemux = "--skipdemux" in args
         qidx = int(get("--quality", "0") or 0)
         qp = QP_LEVELS[max(0, min(qidx, len(QP_LEVELS) - 1))][1]
+        logfile = get("--logfile")
         if not left or not right or not out:
             print("用法: python bd3d2sbs.py --cli --left 00000.m2ts --right 00001.m2ts "
                   "--out x.mkv [--layout full_sbs|half_sbs|full_tab|half_tab] "
                   "[--container mkv|mp4] [--encoder gpu|cpu] [--quality 0-3] "
-                  "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux]")
+                  "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux] [--logfile f]")
             return 1
+
+        def _out(s):
+            print(s, flush=True)
+            if logfile:
+                try:
+                    with open(logfile, "a", encoding="utf-8") as f:
+                        f.write(s + "\n")
+                except Exception:
+                    pass
+
         job = ConvertJob(
             left, right, out,
             layout=get("--layout", "full_sbs"),
@@ -1265,18 +1320,14 @@ def main():
             qp=qp,
             audio_mode=("none" if noaudio else "dual"),
             max_frames=frames, skip_demux=skipdemux,
-            on_log=lambda s: print(s, flush=True),
-            on_progress=lambda st, pct, info: print(
-                "[%5.1f%%] %s %s" % (pct, st, info), flush=True))
+            on_log=_out,
+            on_progress=lambda st, pct, info: _out(
+                "[%5.1f%%] %s %s" % (pct, st, info)))
         job.run()
         return 0
     enable_dpi_awareness()
     root = tk.Tk()
-    try:
-        # 按屏幕 DPI 缩放字体，避免高分屏下过小
-        root.tk.call("tk", "scaling", root.winfo_fpixels("1i") / 72.0)
-    except Exception:
-        pass
+    apply_font_scale(root)
     app = App(root)
     if "--selftest" in args:
         def _selfcheck():
@@ -1301,6 +1352,42 @@ def main():
             print(msg)
             root.destroy()
         root.after(400, _selfcheck)
+    if "--layoutcheck" in args:
+        def _layoutcheck():
+            try:
+                root.state("zoomed")
+            except Exception:
+                pass
+
+            def _report():
+                root.update_idletasks()
+                out = ["window=%dx%d" % (root.winfo_width(), root.winfo_height()),
+                       "screen=%dx%d" % (root.winfo_screenwidth(),
+                                         root.winfo_screenheight()),
+                       "tk_scaling=%.3f" % root.tk.call("tk", "scaling")]
+                try:
+                    fpx = root.winfo_fpixels("1i")
+                    out.append("dpi=%.1f" % fpx)
+                except Exception:
+                    pass
+
+                def info(tag, wdg):
+                    try:
+                        x = wdg.winfo_rootx() - root.winfo_rootx()
+                        out.append("%s: x=%d w=%d right=%d vis=%s" % (
+                            tag, x, wdg.winfo_width(), x + wdg.winfo_width(),
+                            wdg.winfo_ismapped()))
+                    except Exception as e:
+                        out.append("%s: ERR %s" % (tag, e))
+
+                info("btn_start", app.btn_start)
+                info("progressbar", app.pb)
+                info("summary_fmt", app.sec_fmt.sum_lbl)
+                print("\n".join(out), flush=True)
+                root.destroy()
+
+            root.after(1000, _report)
+        root.after(300, _layoutcheck)
     root.mainloop()
     return 0
 
