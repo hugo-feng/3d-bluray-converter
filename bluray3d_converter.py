@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-BD3D 转换器（Qt 版）
-把 3D 蓝光原盘（左右眼双流）转成 SBS/TAB 立体视频（HEVC，AMD GPU 硬件编码）。
+3D 蓝光转换器（3D Blu-ray Converter）
+把 3D 蓝光原盘（左右眼双流）转成 SBS/TAB 立体视频（HEVC 硬件编码：AMD / NVIDIA / Intel）。
 
 源文件结构：BDMV\\STREAM 下
   00000.m2ts = 左眼（AVC 基础视图，含音轨）
@@ -10,10 +10,10 @@ BD3D 转换器（Qt 版）
 流程：tsMuxeR 分别解出两路 ES -> FRIMSource 解码 MVC -> AviSynth 合成布局 -> ffmpeg 编码
 界面：Qt (PySide6)，框架级双缓冲，窗口缩放即时无闪烁
 
-用法（GUI）: python bd3d2sbs.py
-用法（CLI）: python bd3d2sbs.py --cli --left "00000.m2ts" --right "00001.m2ts" --out "x.mkv"
+用法（GUI）: python bluray3d_converter.py
+用法（CLI）: python bluray3d_converter.py --cli --left "00000.m2ts" --right "00001.m2ts" --out "x.mkv"
              [--layout full_sbs|half_sbs|full_tab|half_tab]
-             [--container mkv|mp4] [--encoder gpu|cpu] [--quality 0-3]
+             [--container mkv|mp4] [--encoder amf|nvenc|qsv|cpu] [--quality 0-3]
              [--bitrate 20] [--frames N] [--noaudio] [--skipdemux]
 """
 import os
@@ -34,8 +34,8 @@ from PySide6.QtWidgets import (
     QProgressBar, QLabel, QComboBox, QCheckBox, QPlainTextEdit, QFrame, QStyle,
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
-APP_TITLE = "BD3D 转换器"
-APP_VERSION = "v1.9.1"
+APP_TITLE = "3D 蓝光转换器"
+APP_VERSION = "v2.0.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [

@@ -21,3 +21,6 @@ __pycache__/
 *.mvc
 *.ts
 *.ssif
+
+# 运行日志
+selftest.log
