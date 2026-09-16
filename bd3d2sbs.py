@@ -785,6 +785,7 @@ def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
             on_log(s)
 
     part = os.path.splitext(out_file)[0] + ".partial" + os.path.splitext(out_file)[1]
+    t0 = time.time()
 
     def work():
         try:
@@ -817,7 +818,7 @@ def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
             if os.path.exists(part):
                 os.remove(part)
             if on_progress:
-                on_progress(1.0, "拼接中（直封装）")
+                on_progress(1.0, "正在读取各段信息，准备拼接...")
 
             if os.path.exists(MKVMERGE):
                 cmd = [MKVMERGE, "--gui-mode", "-o", part]
@@ -831,8 +832,16 @@ def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
                 for line in proc.stdout:
                     m = re.search(r"#GUI#progress (\d+)%", line)
                     if m and on_progress:
-                        on_progress(max(2.0, min(float(m.group(1)), 98.0)),
-                                    "拼接中（直封装）")
+                        pct = max(2.0, min(float(m.group(1)), 98.0))
+                        el = time.time() - t0
+                        if pct > 2 and el >= 1.0:
+                            remain = el * (100.0 - pct) / pct
+                            info = "拼接中（直封装）%.0f%% · %s" % (
+                                pct, "即将完成" if remain < 3
+                                else "剩余约 " + fmt_time(remain))
+                        else:
+                            info = "拼接中（直封装）%.0f%% · 正在估算剩余时间..." % pct
+                        on_progress(pct, info)
                     elif "#GUI#warning" in line.lower() or "warning" in line.lower():
                         log("  mkvmerge: " + line.strip())
                 proc.wait()
@@ -1233,15 +1242,18 @@ class MainWindow(QWidget):
         self.sec_cat = Section("无损拼接（两段合成全片）")
         self.le_seg1 = QLineEdit(self.cfg.get("seg1", ""))
         self.le_seg2 = QLineEdit(self.cfg.get("seg2", ""))
+        self.le_cat_out = QLineEdit(self.cfg.get("cat_out", ""))
         self._file_row(self.sec_cat.body_layout, "第一段", self.le_seg1,
                        self.pick_seg1, "已转换好的前半段（如 d1 的 SBS 输出）")
         self._file_row(self.sec_cat.body_layout, "第二段", self.le_seg2,
                        self.pick_seg2, "已转换好的后半段（如 d2 的 SBS 输出）")
+        self._file_row(self.sec_cat.body_layout, "保存全片", self.le_cat_out,
+                       self.pick_cat_out, "先选好保存位置，再点右侧「开始拼接」")
         r = QHBoxLayout()
         tip = QLabel("不重编码，直接封装 · 音轨、字幕、章节全部保留")
         tip.setObjectName("faintlabel")
         r.addWidget(tip, 1)
-        self.btn_concat_run = QPushButton("选择位置并拼接全片")
+        self.btn_concat_run = QPushButton("开始拼接")
         self.btn_concat_run.clicked.connect(self.concat_start)
         r.addWidget(self.btn_concat_run)
         self.sec_cat.body_layout.addLayout(r)
@@ -1315,6 +1327,7 @@ class MainWindow(QWidget):
         self.le_gop.textChanged.connect(lambda _=None: self._refresh_summaries())
         self.le_seg1.textChanged.connect(lambda _=None: self._refresh_summaries())
         self.le_seg2.textChanged.connect(lambda _=None: self._refresh_summaries())
+        self.le_cat_out.textChanged.connect(lambda _=None: self._refresh_summaries())
         self.chk_open.stateChanged.connect(lambda _=None: self._refresh_summaries())
 
         self._on_rc_change(self.cmb_rc.currentText())
@@ -1398,8 +1411,12 @@ class MainWindow(QWidget):
         self.sec_adv.set_summary("GOP %s%s" % (
             self.le_gop.text(), " · 完成后打开" if self.chk_open.isChecked() else ""))
         n = sum(1 for le in (self.le_seg1, self.le_seg2) if le.text().strip())
-        self.sec_cat.set_summary("两段已就绪" if n == 2
-                                 else ("已选 1 段，还差 1 段" if n == 1 else "未选择分段"))
+        if n == 2 and self.le_cat_out.text().strip():
+            self.sec_cat.set_summary("就绪 · 可开始拼接")
+        elif n == 2:
+            self.sec_cat.set_summary("两段已就绪，请选保存位置")
+        else:
+            self.sec_cat.set_summary("已选 1 段，还差 1 段" if n == 1 else "未选择分段")
 
     # ---------- 配置 ----------
     def _load_cfg(self):
@@ -1421,6 +1438,7 @@ class MainWindow(QWidget):
                "audio": self.cmb_audio.currentText(),
                "gop": self.le_gop.text(),
                "seg1": self.le_seg1.text(), "seg2": self.le_seg2.text(),
+               "cat_out": self.le_cat_out.text(),
                "open_after": self.chk_open.isChecked()}
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -1524,7 +1542,7 @@ class MainWindow(QWidget):
         self._concat_running = False
         self._concat_procs = []
         self.btn_concat_run.setEnabled(True)
-        self.btn_concat_run.setText("选择位置并拼接全片")
+        self.btn_concat_run.setText("开始拼接")
         self.lbl_stage.setText("失败")
         if err != "已取消":
             QMessageBox.critical(self, APP_TITLE, "任务失败：\n" + err)
@@ -1645,6 +1663,10 @@ class MainWindow(QWidget):
             "视频文件 (*.mkv *.mp4 *.ts *.m2ts);;所有文件 (*)")
         if p:
             self.le_seg1.setText(p)
+            if not self.le_cat_out.text().strip():
+                base = os.path.splitext(os.path.basename(p))[0]
+                self.le_cat_out.setText(
+                    os.path.join(os.path.dirname(p), base + "_完整片.mkv"))
 
     def pick_seg2(self):
         start = os.path.dirname(self.le_seg2.text() or self.le_seg1.text()) or ""
@@ -1653,6 +1675,17 @@ class MainWindow(QWidget):
             "视频文件 (*.mkv *.mp4 *.ts *.m2ts);;所有文件 (*)")
         if p:
             self.le_seg2.setText(p)
+
+    def pick_cat_out(self):
+        base = os.path.splitext(os.path.basename(self.le_seg1.text()))[0] or "完整片"
+        default = self.le_cat_out.text().strip() or os.path.join(
+            os.path.dirname(self.le_seg1.text()), base + "_完整片.mkv")
+        p, _ = QFileDialog.getSaveFileName(
+            self, "选择完整片的保存位置", default, "Matroska 视频 (*.mkv)")
+        if p:
+            if not p.lower().endswith(".mkv"):
+                p += ".mkv"
+            self.le_cat_out.setText(p)
 
     def concat_start(self):
         if self._concat_running:
@@ -1672,15 +1705,18 @@ class MainWindow(QWidget):
         if os.path.normcase(os.path.abspath(seg1)) == os.path.normcase(os.path.abspath(seg2)):
             QMessageBox.critical(self, APP_TITLE, "第一段与第二段不能是同一个文件")
             return
-        base = os.path.splitext(os.path.basename(seg1))[0]
-        out, _ = QFileDialog.getSaveFileName(
-            self, "选择完整片的保存位置",
-            os.path.join(os.path.dirname(seg1), base + "_完整片.mkv"),
-            "Matroska 视频 (*.mkv)")
+        out = self.le_cat_out.text().strip()
         if not out:
-            return
-        if not out.lower().endswith(".mkv"):
-            out += ".mkv"
+            base = os.path.splitext(os.path.basename(seg1))[0]
+            out, _ = QFileDialog.getSaveFileName(
+                self, "选择完整片的保存位置",
+                os.path.join(os.path.dirname(seg1), base + "_完整片.mkv"),
+                "Matroska 视频 (*.mkv)")
+            if not out:
+                return
+            if not out.lower().endswith(".mkv"):
+                out += ".mkv"
+            self.le_cat_out.setText(out)
         self._concat_running = True
         self._concat_procs = []
         self.btn_concat_run.setEnabled(False)
@@ -1702,7 +1738,7 @@ class MainWindow(QWidget):
         self._concat_running = False
         self._concat_procs = []
         self.btn_concat_run.setEnabled(True)
-        self.btn_concat_run.setText("选择位置并拼接全片")
+        self.btn_concat_run.setText("开始拼接")
         self.btn_cancel.setEnabled(False)
         self.lbl_stage.setText("拼接完成")
         QMessageBox.information(self, APP_TITLE, "无损拼接完成！\n\n" + out)
