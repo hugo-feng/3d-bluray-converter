@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "BD3D 转换器"
-APP_VERSION = "v1.8.1"
+APP_VERSION = "v1.9.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -107,6 +107,125 @@ def estimate_output_size(dur, fps, layout, encoder, rc, qp, bitrate_mbps,
     return total_mb, v_kbps, a_kbps
 
 
+FFMPEG_VERSIONS = [
+    ("自动（按显卡驱动匹配）", "auto"),
+    ("最新 master（需 NVIDIA 驱动 610+）", "master"),
+    ("兼容 8.0（需 NVIDIA 驱动 570+）", "8.0"),
+]
+
+
+def ffmpeg_exe(ver):
+    """返回指定版本 ffmpeg 路径（缺失时回退到默认版本）"""
+    p = FFMPEG_COMPAT if ver == "8.0" else FFMPEG
+    if os.path.exists(p):
+        return p
+    return FFMPEG if os.path.exists(FFMPEG) else p
+
+
+def pick_ffmpeg_by_driver(ver_num):
+    """按 NVIDIA 驱动版本选择 ffmpeg：>=610 用最新 master，否则用兼容版 8.0"""
+    if ver_num is None:
+        return "master"
+    return "master" if ver_num >= 610 else "8.0"
+
+
+def probe_nvidia_driver_version():
+    """探测 NVIDIA 驱动版本：返回 (float 版本, 原始字符串)，失败返回 (None, "")"""
+    try:
+        for exe in ("nvidia-smi", r"C:\Windows\System32\nvidia-smi.exe"):
+            try:
+                r = run_hidden([exe, "--query-gpu=driver_version",
+                                "--format=csv,noheader"])
+                out = (r.stdout or "").strip()
+                if out:
+                    raw = out.splitlines()[0].strip()
+                    m = re.match(r"(\d+)\.(\d+)", raw)
+                    if m:
+                        return int(m.group(1)) + int(m.group(2)) / 100.0, raw
+            except Exception:
+                continue
+        r = run_hidden(["powershell", "-NoProfile", "-Command",
+                        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+                        "(Get-CimInstance Win32_VideoController | Where-Object "
+                        "{$_.Name -match 'NVIDIA'}).DriverVersion -join ';'"])
+        for chunk in (r.stdout or "").split(";"):
+            m = re.match(r"^\d+\.\d+\.(\d+)\.(\d+)$", chunk.strip())
+            if m:
+                s = m.group(1) + m.group(2).zfill(4)
+                if s.startswith("1") and len(s) >= 6:
+                    s = s[1:]
+                if len(s) >= 5:
+                    return int(s[:3]) + int(s[3:5]) / 100.0, chunk.strip()
+    except Exception:
+        pass
+    return None, ""
+
+
+def build_video_args(encoder, speed, rc, qp, bitrate, gop):
+    """构造视频编码参数（视频流参数，供转换与可用性预检共用）"""
+    args = []
+    if encoder == "amf":
+        args += ["-c:v", "hevc_amf", "-usage", "transcoding",
+                 "-quality", speed]
+        if rc == "cqp":
+            args += ["-rc", "cqp", "-qp_i", str(qp), "-qp_p", str(qp + 2)]
+        elif rc == "vbr":
+            args += ["-rc", "vbr_peak", "-b:v", "%dM" % bitrate,
+                     "-maxrate", "%dM" % int(bitrate * 1.5),
+                     "-bufsize", "%dM" % (bitrate * 2)]
+        else:
+            args += ["-rc", "cbr", "-b:v", "%dM" % bitrate,
+                     "-maxrate", "%dM" % bitrate,
+                     "-bufsize", "%dM" % (bitrate * 2)]
+    elif encoder == "nvenc":
+        args += ["-c:v", "hevc_nvenc", "-preset",
+                 NVENC_PRESET.get(speed, "p5")]
+        if rc == "cqp":
+            args += ["-rc", "constqp", "-qp", str(qp)]
+        else:
+            rate = "vbr" if rc == "vbr" else "cbr"
+            args += ["-rc", rate, "-b:v", "%dM" % bitrate,
+                     "-maxrate", "%dM" % int(bitrate * (1.5 if rc == "vbr" else 1.0)),
+                     "-bufsize", "%dM" % (bitrate * 2)]
+    elif encoder == "qsv":
+        args += ["-c:v", "hevc_qsv", "-preset",
+                 QSV_PRESET.get(speed, "medium")]
+        if rc == "cqp":
+            args += ["-global_quality", str(qp)]
+        else:
+            args += ["-b:v", "%dM" % bitrate,
+                     "-maxrate", "%dM" % int(bitrate * (1.5 if rc == "vbr" else 1.0)),
+                     "-bufsize", "%dM" % (bitrate * 2)]
+    else:
+        args += ["-c:v", "libx265", "-preset",
+                 X265_PRESET.get(speed, "medium")]
+        if rc == "cqp":
+            args += ["-crf", str(qp)]
+        else:
+            args += ["-b:v", "%dM" % bitrate]
+    args += ["-g", str(gop), "-color_primaries", "bt709",
+             "-color_trc", "bt709", "-colorspace", "bt709",
+             "-color_range", "tv"]
+    return args
+
+
+def probe_encoder(encoder, speed, rc, qp, bitrate, gop, ffmpeg=None):
+    """快速验证编码器在本机可用（3 帧测试编码），返回 (ok, 错误信息)"""
+    cmd = [ffmpeg or FFMPEG, "-hide_banner", "-v", "error", "-f", "lavfi",
+           "-i", "color=black:s=256x256:r=24", "-frames:v", "3", "-an"]
+    cmd += build_video_args(encoder, speed, rc, qp, bitrate, gop)
+    cmd += ["-f", "null", "-"]
+    try:
+        r = run_hidden(cmd)
+    except Exception as e:
+        return False, str(e)
+    if r.returncode == 0:
+        return True, ""
+    msg = ((r.stderr or "") + (r.stdout or "")).strip()
+    lines = [ln for ln in msg.splitlines() if ln.strip()]
+    return False, "\n".join(lines[-4:])[:400]
+
+
 def probe_source_stats(path):
     """读取源统计数据（单次 ffprobe）：(时长秒, 帧率, 音轨总码率 kbps)"""
     try:
@@ -166,7 +285,9 @@ if getattr(sys, "frozen", False):
 else:
     _BIN_BASE = _CFG_BASE = _ICO_BASE = os.path.dirname(os.path.abspath(__file__))
 BIN_DIR = os.path.join(_BIN_BASE, "bin")
-FFMPEG = os.path.join(BIN_DIR, "ffmpeg.exe")
+FFMPEG_DIR = os.path.join(BIN_DIR, "ffmpeg")
+FFMPEG = os.path.join(FFMPEG_DIR, "master", "ffmpeg.exe")
+FFMPEG_COMPAT = os.path.join(FFMPEG_DIR, "8.0", "ffmpeg.exe")
 FFPROBE = os.path.join(BIN_DIR, "ffprobe.exe")
 TSMUXER = os.path.join(BIN_DIR, "tsMuxeR.exe")
 FRIMSOURCE = os.path.join(BIN_DIR, "FRIMSource.dll")
@@ -418,7 +539,7 @@ class ConvertJob(threading.Thread):
     def __init__(self, left_file, right_file, out_file, layout="full_sbs",
                  container="mkv", encoder="amf", rc="cqp", qp=18, bitrate=20,
                  speed="quality", gop=96, audio_mode="dual", audio_track=None,
-                 open_after=False, max_frames=0, skip_demux=False,
+                 open_after=False, max_frames=0, skip_demux=False, ffmpeg=None,
                  on_log=None, on_progress=None, on_done=None, on_error=None):
         super().__init__(daemon=True)
         self.left_file = left_file
@@ -444,6 +565,7 @@ class ConvertJob(threading.Thread):
         self.cancel_flag = False
         self.proc = None
         self.workdir = ""
+        self.ffmpeg = ffmpeg or FFMPEG
 
     def cancel(self):
         self.cancel_flag = True
@@ -636,50 +758,8 @@ class ConvertJob(threading.Thread):
         return avs
 
     def _video_args(self):
-        args = []
-        if self.encoder == "amf":
-            args += ["-c:v", "hevc_amf", "-usage", "transcoding",
-                     "-quality", self.speed]
-            if self.rc == "cqp":
-                args += ["-rc", "cqp", "-qp_i", str(self.qp), "-qp_p", str(self.qp + 2)]
-            elif self.rc == "vbr":
-                args += ["-rc", "vbr_peak", "-b:v", "%dM" % self.bitrate,
-                         "-maxrate", "%dM" % int(self.bitrate * 1.5),
-                         "-bufsize", "%dM" % (self.bitrate * 2)]
-            else:
-                args += ["-rc", "cbr", "-b:v", "%dM" % self.bitrate,
-                         "-maxrate", "%dM" % self.bitrate,
-                         "-bufsize", "%dM" % (self.bitrate * 2)]
-        elif self.encoder == "nvenc":
-            args += ["-c:v", "hevc_nvenc", "-preset",
-                     NVENC_PRESET.get(self.speed, "p5")]
-            if self.rc == "cqp":
-                args += ["-rc", "constqp", "-qp", str(self.qp)]
-            else:
-                rate = "vbr" if self.rc == "vbr" else "cbr"
-                args += ["-rc", rate, "-b:v", "%dM" % self.bitrate,
-                         "-maxrate", "%dM" % int(self.bitrate * (1.5 if self.rc == "vbr" else 1.0)),
-                         "-bufsize", "%dM" % (self.bitrate * 2)]
-        elif self.encoder == "qsv":
-            args += ["-c:v", "hevc_qsv", "-preset",
-                     QSV_PRESET.get(self.speed, "medium")]
-            if self.rc == "cqp":
-                args += ["-global_quality", str(self.qp)]
-            else:
-                args += ["-b:v", "%dM" % self.bitrate,
-                         "-maxrate", "%dM" % int(self.bitrate * (1.5 if self.rc == "vbr" else 1.0)),
-                         "-bufsize", "%dM" % (self.bitrate * 2)]
-        else:
-            args += ["-c:v", "libx265", "-preset",
-                     X265_PRESET.get(self.speed, "medium")]
-            if self.rc == "cqp":
-                args += ["-crf", str(self.qp)]
-            else:
-                args += ["-b:v", "%dM" % self.bitrate]
-        args += ["-g", str(self.gop), "-color_primaries", "bt709",
-                 "-color_trc", "bt709", "-colorspace", "bt709",
-                 "-color_range", "tv"]
-        return args
+        return build_video_args(self.encoder, self.speed, self.rc,
+                                self.qp, self.bitrate, self.gop)
 
     def _encode(self, base, dep, nframes, audio_src, audio_idx, audio_codec):
         total = nframes
@@ -691,7 +771,7 @@ class ConvertJob(threading.Thread):
 
         # ---- 阶段 2A：编码纯视频 ----
         tmp_video = os.path.join(self.workdir, "video_only.mkv")
-        cmd = [FFMPEG, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
+        cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
                "-i", avs_path, "-an"] + self._video_args()
         if self.max_frames:
             cmd += ["-frames:v", str(total)]
@@ -771,7 +851,7 @@ class ConvertJob(threading.Thread):
         base_pct = DEMUX_WEIGHT + VIDEO_WEIGHT
         for ai, (apath, aopts) in enumerate(extract_jobs):
             self._log("提取音频 %d/%d ..." % (ai + 1, len(extract_jobs)))
-            cmd = [FFMPEG, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
+            cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
                    "-t", "%.3f" % dur, "-i", audio_src,
                    "-map", "0:a:%d" % audio_idx] + aopts + [apath]
             p = popen_hidden(cmd)
@@ -806,7 +886,7 @@ class ConvertJob(threading.Thread):
             audio_files.append(apath)
 
         # ---- 阶段 2C：混流（纯顺序 I/O）----
-        cmd = [FFMPEG, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
+        cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
                "-i", tmp_video]
         for a in audio_files:
             cmd += ["-i", a]
@@ -1028,7 +1108,7 @@ class Bridge(QObject):
     concat_progress = Signal(float, str)
     concat_done = Signal(str)
     src_stats = Signal(object)
-    gpu_info = Signal(str)
+    gpu_info = Signal(object)
 
 
 class SmoothScrollArea(QScrollArea):
@@ -1211,6 +1291,10 @@ class MainWindow(QWidget):
         self.cfg = self._load_cfg()
         self._theme = self.cfg.get("theme", "dark")
         self.job = None
+        self._gpu_names = ""
+        self._nv_driver = (None, "")
+        self._encoder_touched = False
+        self._enc_user_fixed = bool(self.cfg.get("encoder_touched", False))
         self.audio_tracks = []
         self._concat_running = False
         self._concat_procs = []
@@ -1319,6 +1403,8 @@ class MainWindow(QWidget):
         self.cmb_encoder = NoWheelComboBox()
         self.cmb_encoder.addItems([x[0] for x in ENCODERS])
         self._set_combo(self.cmb_encoder, self.cfg.get("encoder", ENCODERS[0][0]))
+        self.cmb_encoder.activated.connect(
+            lambda _=None: setattr(self, "_encoder_touched", True))
         r.addWidget(self.cmb_encoder, 2)
         r.addWidget(QLabel("速度"))
         self.cmb_speed = NoWheelComboBox()
@@ -1377,6 +1463,16 @@ class MainWindow(QWidget):
         self.le_frames.setFixedWidth(80)
         r.addWidget(self.le_frames)
         r.addStretch(1)
+        self.sec_adv.body_layout.addLayout(r)
+        r = QHBoxLayout()
+        r.addWidget(QLabel("FFmpeg 版本"))
+        self.cmb_ffver = NoWheelComboBox()
+        self.cmb_ffver.addItems([x[0] for x in FFMPEG_VERSIONS])
+        self._set_combo(self.cmb_ffver, self.cfg.get("ffver", FFMPEG_VERSIONS[0][0]))
+        r.addWidget(self.cmb_ffver, 2)
+        tip2 = QLabel("N 卡 NVENC 报「驱动版本不满足」时，可切换兼容版 8.0 或改选其他编码器")
+        tip2.setObjectName("faintlabel")
+        r.addWidget(tip2, 3)
         self.sec_adv.body_layout.addLayout(r)
         root.addWidget(self.sec_adv)
 
@@ -1463,7 +1559,7 @@ class MainWindow(QWidget):
 
         # 联动摘要
         for cb in (self.cmb_layout, self.cmb_container, self.cmb_encoder,
-                   self.cmb_speed, self.cmb_qp, self.cmb_audio):
+                   self.cmb_speed, self.cmb_qp, self.cmb_audio, self.cmb_ffver):
             cb.currentTextChanged.connect(lambda _=None: self._refresh_summaries())
         self.cmb_rc.currentTextChanged.connect(self._on_rc_change)
         self.le_gop.textChanged.connect(lambda _=None: self._refresh_summaries())
@@ -1575,8 +1671,9 @@ class MainWindow(QWidget):
             enc, self.cmb_qp.currentText().split("（")[0],
             self.cmb_speed.currentText()))
         self.sec_aud.set_summary("自动 · %s" % self.cmb_audio.currentText().split("（")[0])
-        self.sec_adv.set_summary("GOP %s%s" % (
-            self.le_gop.text(), " · 完成后打开" if self.chk_open.isChecked() else ""))
+        self.sec_adv.set_summary("GOP %s%s · FFmpeg %s" % (
+            self.le_gop.text(), " · 完成后打开" if self.chk_open.isChecked() else "",
+            self.cmb_ffver.currentText().split("（")[0]))
         n = sum(1 for le in (self.le_seg1, self.le_seg2) if le.text().strip())
         if n == 2 and self.le_cat_out.text().strip():
             self.sec_cat.set_summary("就绪 · 可开始拼接")
@@ -1664,15 +1761,42 @@ class MainWindow(QWidget):
                 names = (r.stdout or "").strip()
             except Exception:
                 pass
-            if names:
-                self.bridge.gpu_info.emit(names)
+            drv, drv_raw = probe_nvidia_driver_version()
+            self.bridge.gpu_info.emit((names, drv, drv_raw))
         threading.Thread(target=work, daemon=True).start()
 
-    def _apply_gpu_info(self, names):
-        self._log("检测到显卡：%s" % names)
-        self.cmb_encoder.setToolTip(
-            "检测到的显卡：\n%s\n\n提示：选择未安装对应硬件的硬件编码器会转换失败，"
-            "此时请改用其他编码器。" % names)
+    def _apply_gpu_info(self, payload):
+        names, drv, drv_raw = payload
+        if names:
+            self._gpu_names = names
+            self._log("检测到显卡：%s" % names)
+        self._nv_driver = (drv, drv_raw)
+        if drv_raw:
+            self._log("NVIDIA 驱动版本：%s" % drv_raw)
+        t = (names or "").lower()
+        target = None
+        for val, keys in (("nvenc", ("nvidia", "geforce", "rtx", "quadro")),
+                          ("qsv", ("intel", "arc", "iris", "uhd graphics")),
+                          ("amf", ("amd", "radeon"))):
+            if any(k in t for k in keys):
+                target = val
+                break
+        if target and not (self._encoder_touched or self._enc_user_fixed):
+            idx = next((i for i, (_, v) in enumerate(ENCODERS) if v == target), -1)
+            if idx >= 0 and idx != self.cmb_encoder.currentIndex():
+                self.cmb_encoder.setCurrentIndex(idx)
+                self._log("已按检测到的显卡自动选择编码器：%s" % ENCODERS[idx][0])
+                self._refresh_summaries()
+        if target == "nvenc" and drv is not None:
+            self._log("FFmpeg 版本：自动模式将使用 %s" % pick_ffmpeg_by_driver(drv))
+        tip = ""
+        if names:
+            tip = "检测到的显卡：\n%s\n" % names
+        if drv_raw:
+            tip += "NVIDIA 驱动：%s\n" % drv_raw
+        tip += ("\n提示：选择未安装对应硬件的硬件编码器会转换失败；"
+                "N 卡驱动过旧时可在「高级 → FFmpeg 版本」切换兼容版 8.0。")
+        self.cmb_encoder.setToolTip(tip)
 
     # ---------- 配置 ----------
     def _load_cfg(self):
@@ -1693,8 +1817,10 @@ class MainWindow(QWidget):
                "bitrate": self.le_bitrate.text(),
                "audio": self.cmb_audio.currentText(),
                "gop": self.le_gop.text(),
+               "ffver": self.cmb_ffver.currentText(),
                "seg1": self.le_seg1.text(), "seg2": self.le_seg2.text(),
                "cat_out": self.le_cat_out.text(),
+               "encoder_touched": bool(self._encoder_touched or self._enc_user_fixed),
                "open_after": self.chk_open.isChecked()}
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -1906,6 +2032,46 @@ class MainWindow(QWidget):
             pos = self.cmb_track.currentIndex() - 1
             if 0 <= pos < len(self.audio_tracks):
                 audio_track = self.audio_tracks[pos][0]
+        # FFmpeg 版本解析（自动：按 NVIDIA 驱动版本匹配）
+        ffver_mode = self._sel(FFMPEG_VERSIONS, self.cmb_ffver.currentText(), "auto")
+        drv, drv_raw = self._nv_driver
+        if ffver_mode == "auto":
+            if drv is None:
+                drv, drv_raw = probe_nvidia_driver_version()
+                self._nv_driver = (drv, drv_raw)
+            eff_ver = pick_ffmpeg_by_driver(drv)
+            self._log("FFmpeg 版本：自动 → %s%s" % (
+                eff_ver, "（NVIDIA 驱动 %s）" % drv_raw if drv_raw else ""))
+        else:
+            eff_ver = ffver_mode
+            self._log("FFmpeg 版本：%s（手动指定）" % eff_ver)
+        ff_exe = ffmpeg_exe(eff_ver)
+        # 编码器可用性预检（3 帧测试，避免解流后才失败）
+        enc_val = self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf")
+        speed_val = self._sel(SPEEDS, self.cmb_speed.currentText(), "quality")
+        rc_val = self._sel(RC_MODES, self.cmb_rc.currentText(), "cqp")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok, emsg = probe_encoder(enc_val, speed_val, rc_val, qp, bitrate, gop,
+                                     ffmpeg=ff_exe)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not ok:
+            self._log("编码器预检失败（%s / FFmpeg %s）：%s" % (
+                self.cmb_encoder.currentText(), eff_ver, emsg))
+            QMessageBox.critical(
+                self, APP_TITLE,
+                "所选编码器在本机不可用：\n\n%s\n\n%s\n\n"
+                "处理建议：\n"
+                "  · NVIDIA 驱动版本不满足时，到「高级 → FFmpeg 版本」切换兼容版 8.0\n"
+                "  · 或在「编码设置 → 编码器」改选与本机显卡匹配的编码器\n\n"
+                "本机检测到的显卡：%s" % (
+                    self.cmb_encoder.currentText(),
+                    emsg or "（未返回详细信息）",
+                    self._gpu_names or "未检测到"))
+            return
+        self._log("编码器预检通过：%s（FFmpeg %s）" % (
+            self.cmb_encoder.currentText(), eff_ver))
         self._save_cfg()
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -1942,6 +2108,7 @@ class MainWindow(QWidget):
             layout=self._sel(LAYOUTS, self.cmb_layout.currentText(), "full_sbs"),
             container=container,
             encoder=self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf"),
+            ffmpeg=ff_exe,
             rc=self._sel(RC_MODES, self.cmb_rc.currentText(), "cqp"),
             qp=qp, bitrate=bitrate,
             speed=self._sel(SPEEDS, self.cmb_speed.currentText(), "quality"),
@@ -2095,6 +2262,7 @@ def main():
             print("用法: python bd3d2sbs.py --cli --left 00000.m2ts --right 00001.m2ts "
                   "--out x.mkv [--layout full_sbs|half_sbs|full_tab|half_tab] "
                   "[--container mkv|mp4] [--encoder amf|nvenc|qsv|cpu] [--quality 0-3] "
+                  "[--ffver master|8.0] "
                   "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux]")
             return 1
         job = ConvertJob(
@@ -2102,6 +2270,7 @@ def main():
             layout=get("--layout", "full_sbs"),
             container=get("--container", "mkv"),
             encoder=get("--encoder", "amf"),
+            ffmpeg=ffmpeg_exe(get("--ffver", "master")),
             bitrate=int(get("--bitrate", "20") or 20),
             qp=qp,
             audio_mode=("none" if noaudio else "dual"),
@@ -2134,6 +2303,7 @@ def main():
                 win.sec_fmt.toggle()
                 assert not win.sec_fmt._expanded, "折叠区收起失败"
                 assert os.path.exists(FFMPEG), "找不到 ffmpeg: " + FFMPEG
+                assert os.path.exists(FFMPEG_COMPAT), "找不到兼容版 ffmpeg: " + FFMPEG_COMPAT
                 assert os.path.exists(TSMUXER), "找不到 tsMuxeR: " + TSMUXER
                 assert os.path.exists(FRIMSOURCE), "找不到 FRIMSource: " + FRIMSOURCE
                 assert os.path.exists(MKVMERGE), "找不到 mkvmerge: " + MKVMERGE
