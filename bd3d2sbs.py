@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "BD3D 转换器"
-APP_VERSION = "v1.8"
+APP_VERSION = "v1.8.1"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -526,24 +526,53 @@ class ConvertJob(threading.Thread):
         p = popen_hidden([TSMUXER, meta_path, self.workdir])
         self.proc = p
         nframes = 0
+        tail = []
+        last_chk = -1
         for line in p.stdout:
             self._check()
             line = line.strip()
             if not line:
                 continue
+            tail.append(line)
+            if len(tail) > 15:
+                del tail[0]
             m = re.search(r"([\d.]+)% complete", line)
             if m:
-                self.on_progress("demux", float(m.group(1)), "解流中")
+                pct = float(m.group(1))
+                self.on_progress("demux", pct, "解流中")
+                if int(pct) % 5 == 0 and int(pct) != last_chk:
+                    last_chk = int(pct)
+                    try:
+                        _, _, free = shutil.disk_usage(self.workdir)
+                        if free < 2 * 1024 ** 3:
+                            try:
+                                p.terminate()
+                            except Exception:
+                                pass
+                            raise RuntimeError(
+                                "解流中止：输出磁盘剩余空间不足 2 GB，"
+                                "请清理空间或更换输出位置后重试")
+                    except OSError:
+                        pass
             m = re.search(r"Processed (\d+) video frames", line)
             if m:
                 nframes = max(nframes, int(m.group(1)))
-            if re.search(r"error|Error|错误", line):
+            if re.search(r"error|Error|错误|Cannot|cannot|space", line):
                 self._log("  tsMuxeR: " + line)
         p.wait()
         self.proc = None
         self._check()
         if p.returncode != 0:
-            raise RuntimeError("解流失败（tsMuxeR 返回码 %s）" % p.returncode)
+            self._log("tsMuxeR 输出（末尾）：")
+            for ln in tail:
+                self._log("  " + ln)
+            raise RuntimeError(
+                "解流失败（tsMuxeR 返回码 %s）。\n"
+                "常见原因：\n"
+                "  1. 输出磁盘空间不足（解流中间文件与源文件大小接近）\n"
+                "  2. 源文件损坏或读取错误\n"
+                "  3. 安全软件拦截了写入\n"
+                "详细输出见日志窗口（已记录 tsMuxeR 末尾输出）。" % p.returncode)
         left_name = os.path.splitext(os.path.basename(self.left_file))[0]
         right_name = os.path.splitext(os.path.basename(self.right_file))[0]
         cand_left = os.path.join(self.workdir, "%s.track_%d.264" % (left_name, left_pid))
@@ -672,6 +701,7 @@ class ConvertJob(threading.Thread):
         self.proc = p
         cur = 0
         t0 = time.time()
+        last_free_chk = t0
         for line in p.stdout:
             self._check()
             line = line.strip()
@@ -684,6 +714,21 @@ class ConvertJob(threading.Thread):
                     pass
                 if cur <= 0:
                     continue
+                now = time.time()
+                if now - last_free_chk > 10:
+                    last_free_chk = now
+                    try:
+                        _, _, free = shutil.disk_usage(self.workdir)
+                        if free < 2 * 1024 ** 3:
+                            try:
+                                p.terminate()
+                            except Exception:
+                                pass
+                            raise RuntimeError(
+                                "编码中止：输出磁盘剩余空间不足 2 GB，"
+                                "请清理空间或更换输出位置后重试")
+                    except OSError:
+                        pass
                 speed = cur / max(time.time() - t0, 0.001)
                 remain = (total - cur) / speed if speed > 0.01 else 0
                 pct = DEMUX_WEIGHT + (cur / max(total, 1)) * VIDEO_WEIGHT
@@ -1758,18 +1803,63 @@ class MainWindow(QWidget):
         if err != "已取消":
             QMessageBox.critical(self, APP_TITLE, "任务失败：\n" + err)
 
-    def _check_disk_space(self, out):
+    def _source_total_bytes(self):
+        total = 0
+        for p in (self.le_left.text().strip(), self.le_right.text().strip()):
+            try:
+                if p and os.path.exists(p):
+                    total += os.path.getsize(p)
+            except OSError:
+                pass
+        return total
+
+    def _estimated_output_mb(self):
+        if self._src_dur <= 0:
+            return 0.0
+        layout = self._sel(LAYOUTS, self.cmb_layout.currentText(), "full_sbs")
+        encoder = self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf")
+        rc = self._sel(RC_MODES, self.cmb_rc.currentText(), "cqp")
+        qp = self._sel(QP_LEVELS, self.cmb_qp.currentText(), 18)
         try:
-            total, used, free = shutil.disk_usage(os.path.dirname(os.path.abspath(out)))
-            if free < 45 * 1024 ** 3:
-                r = QMessageBox.question(
-                    self, APP_TITLE,
-                    "输出目录所在磁盘剩余空间为 %.1f GB，低于建议值 45 GB。\n"
-                    "转换过程可能因空间不足而失败，是否仍要继续？" % (free / 1024 ** 3),
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                return r == QMessageBox.Yes
+            bitrate = max(1, int(self.le_bitrate.text()))
+        except ValueError:
+            bitrate = 20
+        audio_mode = self._sel(AUDIO_MODES, self.cmb_audio.currentText(), "dual")
+        mb, _, _ = estimate_output_size(
+            self._src_dur, self._src_fps or 23.976, layout, encoder, rc, qp,
+            bitrate, self._src_a_kbps, audio_mode)
+        return mb
+
+    def _check_disk_space(self, out):
+        """输出盘空间预检：连成品都放不下则直接阻止；中间文件可能不足则强提醒"""
+        try:
+            _, _, free = shutil.disk_usage(os.path.dirname(os.path.abspath(out)))
         except Exception:
-            pass
+            return True
+        free_gb = free / 1024.0 ** 3
+        est_out = self._estimated_output_mb() * 1024 * 1024
+        src_total = self._source_total_bytes()
+        if est_out > 0 and free < est_out * 1.1:
+            QMessageBox.critical(
+                self, APP_TITLE,
+                "输出磁盘剩余空间不足，无法开始：\n\n"
+                "剩余：%.1f GB\n成品预计就需要：约 %.1f GB\n\n"
+                "请清理空间或更换输出位置后重试。"
+                % (free_gb, est_out / 1024.0 ** 3))
+            return False
+        need = src_total + est_out + 3 * 1024 ** 3
+        if need > 0 and free < need:
+            r = QMessageBox.question(
+                self, APP_TITLE,
+                "输出磁盘空间可能不足：\n\n"
+                "剩余：%.1f GB\n"
+                "预计需要：解流中间文件约 %.1f GB + 成品约 %.1f GB（共约 %.1f GB）\n\n"
+                "空间不足会导致解流 / 编码中途失败（如解流进度到一半报错）。\n"
+                "是否仍要继续？" % (
+                    free_gb, src_total / 1024.0 ** 3, est_out / 1024.0 ** 3,
+                    (src_total + est_out) / 1024.0 ** 3),
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            return r == QMessageBox.Yes
         return True
 
     def start(self):
@@ -1789,6 +1879,13 @@ class MainWindow(QWidget):
             return
         if not out:
             QMessageBox.critical(self, APP_TITLE, "请选择输出文件路径")
+            return
+        out_dir = os.path.dirname(os.path.abspath(out))
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(self, APP_TITLE,
+                                 "输出目录无法创建：\n%s\n\n%s" % (out_dir, e))
             return
         if not self._check_disk_space(out):
             return
@@ -1817,6 +1914,9 @@ class MainWindow(QWidget):
         self._log("左眼源文件：%s" % left)
         self._log("右眼源文件：%s" % right)
         self._log("输出文件：%s" % out)
+        src_gb = self._source_total_bytes() / 1024.0 ** 3
+        if src_gb > 0:
+            self._log("源文件合计：%.1f GB（解流中间文件约占同等大小）" % src_gb)
         self._log("3D 布局：%s" % self.cmb_layout.currentText())
         self._log("输出容器：%s" % self.cmb_container.currentText())
         self._log("编码器：%s" % self.cmb_encoder.currentText())
