@@ -160,8 +160,8 @@ QCheckBox::indicator:checked { background: #3574f0; border-color: #3574f0; }
 QCheckBox::indicator:hover { border-color: #3574f0; }
 QPlainTextEdit { background: #121317; border: 1px solid #2e3038; border-radius: 6px;
                  color: #c8cad2; padding: 6px; }
-QScrollBar:vertical { background: #17181c; width: 10px; margin: 0; }
-QScrollBar::handle:vertical { background: #3a3d46; border-radius: 5px; min-height: 30px; }
+QScrollBar:vertical { background: #17181c; width: 12px; margin: 0; }
+QScrollBar::handle:vertical { background: #3a3d46; border-radius: 6px; min-height: 36px; }
 QScrollBar::handle:vertical:hover { background: #4a4e58; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
@@ -821,7 +821,7 @@ class MainWindow(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { border: none; background: #17181c; }")
-        outer.addWidget(scroll)
+        outer.addWidget(scroll, 1)
         content = QWidget()
         content.setObjectName("scrollcontent")
         content.setStyleSheet("background: #17181c;")
@@ -1001,9 +1001,12 @@ class MainWindow(QWidget):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
-        self.log.setFixedHeight(200)
+        self.log.setFixedHeight(180)
         cv.addWidget(self.log)
         root.addWidget(card)
+
+        # 让滚动内容底部不留白（内容不足时贴顶）
+        root.addStretch(0)
 
         # 联动摘要
         for cb in (self.cmb_layout, self.cmb_container, self.cmb_encoder,
