@@ -25,12 +25,13 @@ import shutil
 import threading
 import subprocess
 
-from PySide6.QtCore import Qt, QObject, Signal, QTimer
-from PySide6.QtGui import QIcon, QFont
+from PySide6.QtCore import (Qt, QObject, Signal, QTimer, QRectF, QSize,
+                            QPropertyAnimation, QEasingCurve, QAbstractAnimation)
+from PySide6.QtGui import QIcon, QFont, QPainter, QPainterPath, QColor
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
-    QProgressBar, QLabel, QComboBox, QCheckBox, QPlainTextEdit, QFrame,
-    QFileDialog, QMessageBox, QScrollArea)
+    QProgressBar, QLabel, QComboBox, QCheckBox, QPlainTextEdit, QFrame, QStyle,
+    QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "BD3D 转换器"
 APP_VERSION = "v1.7"
@@ -119,13 +120,14 @@ def icon_pixmap(name, size=16):
         pass
     return None
 
+_ACTIVE = {"theme": "dark"}
 
 THEMES = {
     "dark": dict(
         bg="#17181c", card="#202127", border="#2e3038", text="#e8e9ed",
         dim="#9a9ca8", faint="#6b6d78", input="#2a2c34", input_border="#2e3038",
         accent="#3574f0", accent_h="#2b5fd0", btn="#33363e", btn_h="#3d4149",
-        disabled_bg="#24262c", log_bg="#121317", log_fg="#c8cad2",
+        disabled_bg="#24262c",
         hover="#26272e", chk_border="#3d4149",
         chev_right="chevron-right.svg", chev_down="chevron-down.svg",
         theme_icon="sun.svg"),
@@ -133,7 +135,7 @@ THEMES = {
         bg="#f3f3f3", card="#ffffff", border="#e4e4e4", text="#1b1b1b",
         dim="#5f6368", faint="#8a8d93", input="#ffffff", input_border="#d6d6d6",
         accent="#3574f0", accent_h="#2b5fd0", btn="#f5f5f5", btn_h="#ebebeb",
-        disabled_bg="#eeeeee", log_bg="#fafafa", log_fg="#333333",
+        disabled_bg="#eeeeee",
         hover="#ededed", chk_border="#c0c0c0",
         chev_right="chevron-right-light.svg", chev_down="chevron-down-light.svg",
         theme_icon="moon.svg"),
@@ -168,8 +170,10 @@ QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center r
                        width: 26px; border: none; background: transparent; }
 QComboBox::down-arrow { image: url("@ICONS@/@CHEV_DOWN@"); width: 16px; height: 16px; }
 QComboBox QAbstractItemView { background: @CARD@; border: 1px solid @BORDER@;
-            selection-background-color: @ACCENT@; outline: none; color: @TEXT@;
-            padding: 4px; }
+            border-radius: 8px; selection-background-color: transparent;
+            outline: none; color: @TEXT@; padding: 5px; }
+QComboBox QAbstractItemView::item { border-radius: 5px; padding: 4px 9px;
+            min-height: 22px; color: @TEXT@; }
 QPushButton { background: @BTN@; border: 1px solid @BORDER@; border-radius: 6px;
               padding: 6px 14px; color: @TEXT@; }
 QPushButton:hover { background: @BTN_H@; }
@@ -187,8 +191,8 @@ QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px;
 QCheckBox::indicator:checked { background: @ACCENT@; border-color: @ACCENT@;
                                image: url("@ICONS@/check.svg"); }
 QCheckBox::indicator:hover { border-color: @ACCENT@; }
-QPlainTextEdit { background: @LOG_BG@; border: 1px solid @BORDER@; border-radius: 6px;
-                 color: @LOG_FG@; padding: 6px; }
+QPlainTextEdit { background: #101114; border: 1px solid #2e3038; border-radius: 6px;
+                 color: #ccced6; padding: 6px; }
 QScrollBar:vertical { background: @BG@; width: 12px; margin: 0; }
 QScrollBar::handle:vertical { background: @DIM@; border-radius: 6px; min-height: 36px; }
 QScrollBar::handle:vertical:hover { background: @TEXT@; }
@@ -199,6 +203,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none;
 
 def build_qss(theme, icons_dir):
     """按主题生成完整样式表（@TOKEN@ 占位符替换）"""
+    _ACTIVE["theme"] = theme
     colors = dict(THEMES.get(theme, THEMES["dark"]))
     qss = QSS_TMPL.replace("@ICONS@", icons_dir.replace("\\", "/"))
     for k, v in colors.items():
@@ -762,10 +767,102 @@ class Bridge(QObject):
     error = Signal(str)
 
 
-class NoWheelComboBox(QComboBox):
-    """下拉框忽略滚轮（滚动时滚动页面而不是改变选项）"""
+class SmoothScrollArea(QScrollArea):
+    """平滑滚动区：滚轮按动画过渡，避免一格格跳变"""
+
+    STEP = 110
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._target = 0
+        self._anim = QPropertyAnimation(self.verticalScrollBar(), b"value", self)
+        self._anim.setDuration(260)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def smooth_wheel(self, event):
+        sb = self.verticalScrollBar()
+        dy = event.angleDelta().y()
+        if dy == 0 or sb.maximum() <= sb.minimum():
+            return False
+        running = self._anim.state() == QAbstractAnimation.State.Running
+        base = self._target if running else sb.value()
+        target = max(sb.minimum(), min(base - (dy / 120.0) * self.STEP, sb.maximum()))
+        if not running and target == sb.value():
+            return False
+        self._target = target
+        self._anim.stop()
+        self._anim.setStartValue(sb.value())
+        self._anim.setEndValue(target)
+        self._anim.start()
+        return True
 
     def wheelEvent(self, event):
+        if self.smooth_wheel(event):
+            event.accept()
+        else:
+            event.ignore()
+
+
+class PopupItemDelegate(QStyledItemDelegate):
+    """下拉选项自绘：圆角高亮（Qt 弹层路径下 ::item:selected 不生效，故自绘）"""
+
+    def sizeHint(self, option, index):
+        s = super().sizeHint(option, index)
+        return QSize(s.width() + 20, max(s.height() + 10, 30))
+
+    def paint(self, painter, option, index):
+        c = THEMES[_ACTIVE["theme"]]
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        r = option.rect.adjusted(1, 1, -1, -1)
+        if option.state & QStyle.State_Selected:
+            bg, fg = QColor(c["accent"]), QColor("#ffffff")
+        elif option.state & QStyle.State_MouseOver:
+            bg, fg = QColor(c["hover"]), QColor(c["text"])
+        else:
+            bg, fg = None, QColor(c["text"])
+        if bg is not None:
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(r), 5, 5)
+            painter.fillPath(path, bg)
+        painter.setPen(fg)
+        painter.setFont(option.font)
+        painter.drawText(r.adjusted(9, 0, -9, 0),
+                         Qt.AlignVCenter | Qt.AlignLeft,
+                         index.data(Qt.DisplayRole) or "")
+        painter.restore()
+
+
+class NoWheelComboBox(QComboBox):
+    """下拉框：忽略滚轮（滚动页面而不是改变选项），弹出列表圆角"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        try:
+            v = self.view()
+            v.setFrameShape(QFrame.NoFrame)
+            v.setItemDelegate(PopupItemDelegate(v))
+            v.viewport().setAttribute(Qt.WA_Hover, True)
+            v.viewport().setMouseTracking(True)
+            win = v.window()
+            win.setWindowFlags(win.windowFlags() | Qt.FramelessWindowHint
+                               | Qt.NoDropShadowWindowHint)
+            win.setAttribute(Qt.WA_TranslucentBackground, True)
+            win.setObjectName("comboPopup")
+            win.setStyleSheet("#comboPopup { background: transparent; border: none; }")
+        except Exception:
+            pass
+
+    def wheelEvent(self, event):
+        if self.view().isVisible():
+            super().wheelEvent(event)
+            return
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, SmoothScrollArea) and w.smooth_wheel(event):
+                event.accept()
+                return
+            w = w.parentWidget()
         event.ignore()
 
 
@@ -780,7 +877,7 @@ class Section(QFrame):
         self._theme = "dark"
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 6, 10, 8)
+        lay.setContentsMargins(14, 6, 14, 8)
         lay.setSpacing(8)
 
         self._head = QWidget()
@@ -788,7 +885,7 @@ class Section(QFrame):
         self._head.setAttribute(Qt.WA_StyledBackground, True)
         self._head.setCursor(Qt.PointingHandCursor)
         h = QHBoxLayout(self._head)
-        h.setContentsMargins(8, 4, 8, 4)
+        h.setContentsMargins(0, 4, 0, 4)
         self._arrow = QLabel()
         self._arrow.setFixedWidth(18)
         self._title = QLabel(title)
@@ -804,7 +901,7 @@ class Section(QFrame):
         self.body = QWidget()
         self.body_outer = lay
         self.body_layout = QVBoxLayout(self.body)
-        self.body_layout.setContentsMargins(8, 0, 8, 0)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
         self.body_layout.setSpacing(6)
         self.body.setVisible(False)
         lay.addWidget(self.body)
@@ -870,7 +967,7 @@ class MainWindow(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        scroll = QScrollArea()
+        scroll = SmoothScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1099,7 +1196,7 @@ class MainWindow(QWidget):
         parent.addLayout(row)
         h = QLabel(hint)
         h.setObjectName("faintlabel")
-        h.setContentsMargins(72, 0, 0, 4)
+        h.setContentsMargins(70, 0, 0, 4)
         parent.addWidget(h)
 
     def _sel(self, presets, value, default):
