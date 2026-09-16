@@ -7,7 +7,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用）：
 
-https://github.com/hugo-feng/bd3d2sbs/releases/download/v1.9.0/BD3D2SBS_v1.9.0_portable.zip
+https://github.com/hugo-feng/bd3d2sbs/releases/download/v1.9.1/BD3D2SBS_v1.9.1_portable.zip
 
 > 解压到**纯英文路径**，双击 `BD3D2SBS.exe` 运行。需要 Windows 10/11 x64。
 
