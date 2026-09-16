@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "BD3D 转换器"
-APP_VERSION = "v1.7"
+APP_VERSION = "v1.8"
 
 # ---- 选项定义 ----
 LAYOUTS = [
