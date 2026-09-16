@@ -98,18 +98,36 @@ AUDIO_WEIGHT = 4.0
 MUX_WEIGHT = 5.0
 
 if getattr(sys, "frozen", False):
-    _BIN_BASE = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    _CFG_BASE = os.path.dirname(sys.executable)
+    # PyInstaller: bin 在 exe 旁边；打包数据（app.ico）在 _MEIPASS（_internal）
+    _EXE_DIR = os.path.dirname(sys.executable)
+    _BIN_BASE = _EXE_DIR
+    _CFG_BASE = _EXE_DIR
+    _ICO_BASE = getattr(sys, "_MEIPASS", _EXE_DIR)
 else:
-    _BIN_BASE = _CFG_BASE = os.path.dirname(os.path.abspath(__file__))
+    _BIN_BASE = _CFG_BASE = _ICO_BASE = os.path.dirname(os.path.abspath(__file__))
 BIN_DIR = os.path.join(_BIN_BASE, "bin")
 FFMPEG = os.path.join(BIN_DIR, "ffmpeg.exe")
 FFPROBE = os.path.join(BIN_DIR, "ffprobe.exe")
 TSMUXER = os.path.join(BIN_DIR, "tsMuxeR.exe")
 FRIMSOURCE = os.path.join(BIN_DIR, "FRIMSource.dll")
-ICON_PATH = os.path.join(_BIN_BASE, "app.ico")
+ICON_PATH = os.path.join(_ICO_BASE, "app.ico")
 CONFIG_PATH = os.path.join(_CFG_BASE, "config.json")
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def enable_dpi_awareness():
+    """启用 DPI 感知（避免窗口最大化/缩放后字体发糊）"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 
 class Cancelled(Exception):
@@ -904,14 +922,23 @@ class App:
         return body
 
     def _combo(self, parent, var, values, width, command=None):
-        cb = ttk.Combobox(parent, textvariable=var, values=values, width=width,
-                          style="Dark.TCombobox", state="readonly",
-                          font=F_LABEL)
-        if command:
-            def on_sel(_=None):
-                command(var.get())
-            cb.bind("<<ComboboxSelected>>", on_sel)
-        return cb
+        """原生下拉菜单按钮（点击必展开，深色）"""
+        om = tk.OptionMenu(parent, var, *values, command=command)
+        om.configure(bg=C_INPUT, fg=C_TEXT, activebackground=C_BTN2_H,
+                     activeforeground=C_TEXT, relief="flat", bd=0,
+                     highlightthickness=0, font=F_LABEL, anchor="w",
+                     padx=6, pady=3, width=width, cursor="hand2")
+        om["menu"].configure(bg=C_CARD, fg=C_TEXT, activebackground=C_ACCENT,
+                             activeforeground="#ffffff", font=F_LABEL,
+                             relief="flat", bd=0)
+        return om
+
+    def _set_combo_values(self, om, var, values):
+        """更新原生 OptionMenu 的选项列表"""
+        menu = om["menu"]
+        menu.delete(0, "end")
+        for v in values:
+            menu.add_command(label=v, command=lambda val=v: var.set(val))
 
     def _file_row(self, parent, label, var, browse_cmd, hint=""):
         row = tk.Frame(parent, bg=C_CARD)
@@ -933,7 +960,7 @@ class App:
 
     def _on_rc_change(self, value):
         is_cqp = value == RC_MODES[0][0]
-        self.cmb_qp.configure(state="readonly" if is_cqp else "disabled")
+        self.cmb_qp.configure(state="normal" if is_cqp else "disabled")
         self.entry_bitrate.configure(state="disabled" if is_cqp else "normal")
         self._refresh_summaries()
 
@@ -1023,7 +1050,7 @@ class App:
                     return
                 self.audio_tracks = tracks
                 labels = ["自动（英语优先，最高声道）"] + [t[1] for t in tracks]
-                self.cmb_track.configure(values=labels)
+                self._set_combo_values(self.cmb_track, self.var_track, labels)
                 self.var_track.set(labels[0])
                 self.logline("检测到 %d 条音轨" % len(tracks))
             self.root.after(0, apply)
@@ -1207,10 +1234,37 @@ def main():
                 "[%5.1f%%] %s %s" % (pct, st, info), flush=True))
         job.run()
         return 0
+    enable_dpi_awareness()
     root = tk.Tk()
-    App(root)
+    try:
+        # 按屏幕 DPI 缩放字体，避免高分屏下过小
+        root.tk.call("tk", "scaling", root.winfo_fpixels("1i") / 72.0)
+    except Exception:
+        pass
+    app = App(root)
     if "--selftest" in args:
-        root.after(600, root.destroy)
+        def _selfcheck():
+            msg = ""
+            try:
+                app.sec_fmt.toggle()
+                assert app.sec_fmt._expanded, "折叠区展开失败"
+                app.sec_fmt.toggle()
+                assert not app.sec_fmt._expanded, "折叠区收起失败"
+                assert os.path.exists(FFMPEG), "找不到 ffmpeg: " + FFMPEG
+                assert os.path.exists(TSMUXER), "找不到 tsMuxeR: " + TSMUXER
+                assert os.path.exists(FRIMSOURCE), "找不到 FRIMSource: " + FRIMSOURCE
+                msg = "SELFTEST OK"
+            except Exception as e:
+                msg = "SELFTEST FAIL: %s" % e
+            try:
+                with open(os.path.join(_CFG_BASE, "selftest.log"), "w",
+                          encoding="utf-8") as f:
+                    f.write(msg + "\nBIN_DIR=" + BIN_DIR + "\n")
+            except Exception:
+                pass
+            print(msg)
+            root.destroy()
+        root.after(400, _selfcheck)
     root.mainloop()
     return 0
 
