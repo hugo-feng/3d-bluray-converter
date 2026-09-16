@@ -22,6 +22,7 @@ import sys
 import json
 import time
 import shutil
+import tempfile
 import threading
 import subprocess
 
@@ -104,6 +105,7 @@ FFMPEG = os.path.join(BIN_DIR, "ffmpeg.exe")
 FFPROBE = os.path.join(BIN_DIR, "ffprobe.exe")
 TSMUXER = os.path.join(BIN_DIR, "tsMuxeR.exe")
 FRIMSOURCE = os.path.join(BIN_DIR, "FRIMSource.dll")
+MKVMERGE = os.path.join(BIN_DIR, "mkvmerge.exe")
 ICON_PATH = os.path.join(_ICO_BASE, "app.ico")
 ICONS_DIR = os.path.join(_ICO_BASE, "icons")
 CONFIG_PATH = os.path.join(_CFG_BASE, "config.json")
@@ -731,28 +733,148 @@ class ConvertJob(threading.Thread):
             raise RuntimeError("输出文件异常，请查看日志")
 
 
-def concat_files(files, out_file, on_log=None, on_done=None, on_error=None):
-    """用 concat 解复用器无损拼接多个视频文件"""
+def probe_media_info(path):
+    """读取媒体信息（只读文件头，秒级）：(时长秒, 宽, 高, 视频编码)"""
+    try:
+        r = run_hidden([FFPROBE, "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=width,height,codec_name",
+                        "-show_entries", "format=duration",
+                        "-of", "default=nw=1", path])
+        if r.returncode != 0:
+            return None
+        dur, w, h, vcodec = 0.0, 0, 0, ""
+        for line in (r.stdout or "").splitlines():
+            if "=" not in line:
+                continue
+            k, v = line.strip().split("=", 1)
+            if k == "width":
+                w = int(v)
+            elif k == "height":
+                h = int(v)
+            elif k == "codec_name":
+                vcodec = v
+            elif k == "duration":
+                dur = float(v)
+        return (dur, w, h, vcodec)
+    except Exception:
+        return None
+
+
+def probe_first_keyframe(path):
+    """检查视频第一帧是否为关键帧（只读一帧，快）；无法判断返回 None"""
+    try:
+        r = run_hidden([FFPROBE, "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "frame=key_frame",
+                        "-read_intervals", "%+#1", "-of", "csv=p=0", path])
+        out = (r.stdout or "").strip()
+        return out.splitlines()[0].startswith("1") if out else None
+    except Exception:
+        return None
+
+
+def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
+                 on_error=None, proc_holder=None):
+    """无损拼接多段视频：mkvmerge 直接封装，不重编码（最省时间、零画质损失）。
+
+    时间戳由 mkvmerge 自动对齐，全部音轨/字幕/章节原样保留；
+    先写入同目录 .partial 临时文件，成功后原子替换到目标位置——
+    中途失败/取消不会破坏已存在的目标文件。
+    """
+    def log(s):
+        if on_log:
+            on_log(s)
+
+    part = os.path.splitext(out_file)[0] + ".partial" + os.path.splitext(out_file)[1]
+
     def work():
         try:
-            lst = os.path.join(os.path.dirname(out_file), "_concat_list.txt")
-            with open(lst, "w", encoding="utf-8") as f:
-                for p in files:
-                    f.write("file '%s'\n" % p.replace("\\", "/"))
-            cmd = [FFMPEG, "-hide_banner", "-y", "-f", "concat", "-safe", "0",
-                   "-i", lst, "-c", "copy", "-map", "0", out_file]
-            p = popen_hidden(cmd)
-            lines = []
-            for line in p.stdout:
-                lines.append(line)
-                if on_log and ("error" in line.lower() or "Error" in line):
-                    on_log("  ffmpeg: " + line.strip())
-            p.wait()
-            if p.returncode != 0:
-                raise RuntimeError("拼接失败：\n" + "".join(lines[-8:]))
+            files_abs = [os.path.abspath(p) for p in files]
+            for p in files_abs:
+                if not os.path.exists(p):
+                    raise RuntimeError("找不到文件：" + p)
+
+            log("读取各段信息（仅读文件头）...")
+            infos = []
+            for i, p in enumerate(files_abs, 1):
+                info = probe_media_info(p)
+                if not info:
+                    raise RuntimeError("无法读取媒体信息：" + p)
+                infos.append(info)
+                log("  第 %d 段：%s · %dx%d · %s"
+                    % (i, fmt_time(info[0]), info[1], info[2], info[3]))
+            base = infos[0]
+            for i, info in enumerate(infos[1:], 2):
+                if (info[1], info[2], info[3]) != (base[1], base[2], base[3]):
+                    log("  警告：第 %d 段为 %dx%d（%s），与第一段 %dx%d（%s）不一致"
+                        % (i, info[1], info[2], info[3], base[1], base[2], base[3]))
+            if len(files_abs) > 1:
+                kf = probe_first_keyframe(files_abs[1])
+                if kf is False:
+                    log("  提示：第二段起始帧不是关键帧，接缝处可能极短暂花屏（后续正常）")
+            total = sum(i[0] for i in infos)
+            log("预计全片时长：%s（直封装不重编码，速度仅受磁盘限制）" % fmt_time(total))
+
+            if os.path.exists(part):
+                os.remove(part)
+            if on_progress:
+                on_progress(1.0, "拼接中（直封装）")
+
+            if os.path.exists(MKVMERGE):
+                cmd = [MKVMERGE, "--gui-mode", "-o", part]
+                for i, p in enumerate(files_abs):
+                    if i:
+                        cmd.append("+")
+                    cmd.append(p)
+                proc = popen_hidden(cmd)
+                if proc_holder is not None:
+                    proc_holder.append(proc)
+                for line in proc.stdout:
+                    m = re.search(r"#GUI#progress (\d+)%", line)
+                    if m and on_progress:
+                        on_progress(max(2.0, min(float(m.group(1)), 98.0)),
+                                    "拼接中（直封装）")
+                    elif "#GUI#warning" in line.lower() or "warning" in line.lower():
+                        log("  mkvmerge: " + line.strip())
+                proc.wait()
+                if proc.returncode not in (0, 1):
+                    raise RuntimeError("mkvmerge 拼接失败（退出码 %d）" % proc.returncode)
+            else:
+                lst = os.path.join(tempfile.gettempdir(), "_bd3d_concat_list.txt")
+                with open(lst, "w", encoding="utf-8") as f:
+                    for p in files_abs:
+                        f.write("file '%s'\n" % p.replace("\\", "/"))
+                proc = popen_hidden([FFMPEG, "-hide_banner", "-y", "-f", "concat",
+                                     "-safe", "0", "-i", lst, "-c", "copy",
+                                     "-map", "0", part])
+                if proc_holder is not None:
+                    proc_holder.append(proc)
+                for line in proc.stdout:
+                    if "error" in line.lower():
+                        log("  ffmpeg: " + line.strip())
+                proc.wait()
+                if proc.returncode != 0:
+                    raise RuntimeError("ffmpeg 拼接失败（退出码 %d）" % proc.returncode)
+
+            out_info = probe_media_info(part)
+            if out_info and out_info[0] > 0:
+                delta = out_info[0] - total
+                log("成品校验：时长 %s（两段合计 %s，差异 %+.0f 秒）"
+                    % (fmt_time(out_info[0]), fmt_time(total), delta))
+                if abs(delta) > 8:
+                    log("  注意：差异可能来自源文件时长元数据与实际内容不符；"
+                        "建议快速播放接缝处，确认两段内容完整衔接")
+            os.replace(part, out_file)
+            log("拼接完成：" + out_file)
+            if on_progress:
+                on_progress(100.0, "拼接完成")
             if on_done:
                 on_done(out_file)
         except Exception as e:
+            try:
+                if os.path.exists(part):
+                    os.remove(part)
+            except Exception:
+                pass
             if on_error:
                 on_error(str(e))
     threading.Thread(target=work, daemon=True).start()
@@ -765,6 +887,8 @@ class Bridge(QObject):
     progress = Signal(float, str)
     done = Signal(str)
     error = Signal(str)
+    concat_progress = Signal(float, str)
+    concat_done = Signal(str)
 
 
 class SmoothScrollArea(QScrollArea):
@@ -948,11 +1072,15 @@ class MainWindow(QWidget):
         self._theme = self.cfg.get("theme", "dark")
         self.job = None
         self.audio_tracks = []
+        self._concat_running = False
+        self._concat_procs = []
         self.bridge = Bridge()
         self.bridge.log.connect(self._log)
         self.bridge.progress.connect(self._progress)
         self.bridge.done.connect(self._done)
         self.bridge.error.connect(self._fail)
+        self.bridge.concat_progress.connect(self._progress)
+        self.bridge.concat_done.connect(self._concat_done)
 
         self.setWindowTitle(APP_TITLE)
         self.setObjectName("mainwin")
@@ -1101,6 +1229,24 @@ class MainWindow(QWidget):
         self.sec_adv.body_layout.addLayout(r)
         root.addWidget(self.sec_adv)
 
+        # ---------- 无损拼接（两段合成全片） ----------
+        self.sec_cat = Section("无损拼接（两段合成全片）")
+        self.le_seg1 = QLineEdit(self.cfg.get("seg1", ""))
+        self.le_seg2 = QLineEdit(self.cfg.get("seg2", ""))
+        self._file_row(self.sec_cat.body_layout, "第一段", self.le_seg1,
+                       self.pick_seg1, "已转换好的前半段（如 d1 的 SBS 输出）")
+        self._file_row(self.sec_cat.body_layout, "第二段", self.le_seg2,
+                       self.pick_seg2, "已转换好的后半段（如 d2 的 SBS 输出）")
+        r = QHBoxLayout()
+        tip = QLabel("不重编码，直接封装 · 音轨、字幕、章节全部保留")
+        tip.setObjectName("faintlabel")
+        r.addWidget(tip, 1)
+        self.btn_concat_run = QPushButton("选择位置并拼接全片")
+        self.btn_concat_run.clicked.connect(self.concat_start)
+        r.addWidget(self.btn_concat_run)
+        self.sec_cat.body_layout.addLayout(r)
+        root.addWidget(self.sec_cat)
+
         # ---------- 按钮 ----------
         brow = QHBoxLayout()
         self.btn_start = QPushButton("开始转换")
@@ -1114,9 +1260,6 @@ class MainWindow(QWidget):
         self.btn_cancel.clicked.connect(self.cancel)
         brow.addWidget(self.btn_cancel)
         brow.addStretch(1)
-        self.btn_concat = QPushButton("无损拼接（完整片）")
-        self.btn_concat.clicked.connect(self.concat)
-        brow.addWidget(self.btn_concat)
         root.addLayout(brow)
 
         # ---------- 进度 ----------
@@ -1170,6 +1313,8 @@ class MainWindow(QWidget):
             cb.currentTextChanged.connect(lambda _=None: self._refresh_summaries())
         self.cmb_rc.currentTextChanged.connect(self._on_rc_change)
         self.le_gop.textChanged.connect(lambda _=None: self._refresh_summaries())
+        self.le_seg1.textChanged.connect(lambda _=None: self._refresh_summaries())
+        self.le_seg2.textChanged.connect(lambda _=None: self._refresh_summaries())
         self.chk_open.stateChanged.connect(lambda _=None: self._refresh_summaries())
 
         self._on_rc_change(self.cmb_rc.currentText())
@@ -1224,7 +1369,7 @@ class MainWindow(QWidget):
         if pm is not None:
             self.btn_theme.setIcon(QIcon(pm))
             self.btn_theme.setIconSize(pm.size())
-        for sec in (self.sec_fmt, self.sec_enc, self.sec_aud, self.sec_adv):
+        for sec in (self.sec_fmt, self.sec_enc, self.sec_aud, self.sec_adv, self.sec_cat):
             sec.set_theme(self._theme)
         self._apply_titlebar()
 
@@ -1252,6 +1397,9 @@ class MainWindow(QWidget):
         self.sec_aud.set_summary("自动 · %s" % self.cmb_audio.currentText().split("（")[0])
         self.sec_adv.set_summary("GOP %s%s" % (
             self.le_gop.text(), " · 完成后打开" if self.chk_open.isChecked() else ""))
+        n = sum(1 for le in (self.le_seg1, self.le_seg2) if le.text().strip())
+        self.sec_cat.set_summary("两段已就绪" if n == 2
+                                 else ("已选 1 段，还差 1 段" if n == 1 else "未选择分段"))
 
     # ---------- 配置 ----------
     def _load_cfg(self):
@@ -1272,6 +1420,7 @@ class MainWindow(QWidget):
                "bitrate": self.le_bitrate.text(),
                "audio": self.cmb_audio.currentText(),
                "gop": self.le_gop.text(),
+               "seg1": self.le_seg1.text(), "seg2": self.le_seg2.text(),
                "open_after": self.chk_open.isChecked()}
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -1372,6 +1521,10 @@ class MainWindow(QWidget):
     def _fail(self, err):
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
+        self._concat_running = False
+        self._concat_procs = []
+        self.btn_concat_run.setEnabled(True)
+        self.btn_concat_run.setText("选择位置并拼接全片")
         self.lbl_stage.setText("失败")
         if err != "已取消":
             QMessageBox.critical(self, APP_TITLE, "任务失败：\n" + err)
@@ -1392,6 +1545,9 @@ class MainWindow(QWidget):
 
     def start(self):
         if self.job and self.job.is_alive():
+            return
+        if self._concat_running:
+            QMessageBox.information(self, APP_TITLE, "拼接任务进行中，请等待完成后再开始转换")
             return
         left = self.le_left.text().strip()
         right = self.le_right.text().strip()
@@ -1469,36 +1625,107 @@ class MainWindow(QWidget):
         self.job.start()
 
     def cancel(self):
+        if self._concat_running:
+            self._log("正在取消拼接...")
+            for proc in self._concat_procs:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            return
         if self.job:
             self._log("正在取消...")
             self.lbl_stage.setText("正在取消")
             self.job.cancel()
 
-    def concat(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "按顺序选择要拼接的视频（第一段、第二段...）", "",
-            "视频文件 (*.mkv *.mp4);;所有文件 (*)")
-        if not files or len(files) < 2:
+    # ---------- 无损拼接 ----------
+    def pick_seg1(self):
+        p, _ = QFileDialog.getOpenFileName(
+            self, "选择第一段（前半段）", self.le_seg1.text() or "",
+            "视频文件 (*.mkv *.mp4 *.ts *.m2ts);;所有文件 (*)")
+        if p:
+            self.le_seg1.setText(p)
+
+    def pick_seg2(self):
+        start = os.path.dirname(self.le_seg2.text() or self.le_seg1.text()) or ""
+        p, _ = QFileDialog.getOpenFileName(
+            self, "选择第二段（后半段）", start,
+            "视频文件 (*.mkv *.mp4 *.ts *.m2ts);;所有文件 (*)")
+        if p:
+            self.le_seg2.setText(p)
+
+    def concat_start(self):
+        if self._concat_running:
             return
+        if self.job and self.job.is_alive():
+            QMessageBox.information(self, APP_TITLE, "转换任务进行中，请等待完成后再拼接")
+            return
+        seg1 = self.le_seg1.text().strip()
+        seg2 = self.le_seg2.text().strip()
+        if not seg1 or not seg2:
+            QMessageBox.critical(self, APP_TITLE, "请先分别选择第一段和第二段视频")
+            return
+        for p in (seg1, seg2):
+            if not os.path.exists(p):
+                QMessageBox.critical(self, APP_TITLE, "找不到文件：\n" + p)
+                return
+        if os.path.normcase(os.path.abspath(seg1)) == os.path.normcase(os.path.abspath(seg2)):
+            QMessageBox.critical(self, APP_TITLE, "第一段与第二段不能是同一个文件")
+            return
+        base = os.path.splitext(os.path.basename(seg1))[0]
         out, _ = QFileDialog.getSaveFileName(
-            self, "保存合并后的文件", "", "Matroska 视频 (*.mkv)")
+            self, "选择完整片的保存位置",
+            os.path.join(os.path.dirname(seg1), base + "_完整片.mkv"),
+            "Matroska 视频 (*.mkv)")
         if not out:
             return
-        self._log("开始拼接 %d 个文件" % len(files))
+        if not out.lower().endswith(".mkv"):
+            out += ".mkv"
+        self._concat_running = True
+        self._concat_procs = []
+        self.btn_concat_run.setEnabled(False)
+        self.btn_concat_run.setText("拼接中...")
+        self.btn_cancel.setEnabled(True)
         self.lbl_stage.setText("拼接中")
-        concat_files(list(files), out,
+        self._log("========== 无损拼接 ==========")
+        self._log("第一段：%s" % seg1)
+        self._log("第二段：%s" % seg2)
+        self._log("保存全片：%s" % out)
+        concat_files([seg1, seg2], out,
                      on_log=lambda s: self.bridge.log.emit(s),
-                     on_done=lambda o: self.bridge.done.emit(o),
-                     on_error=lambda e: self.bridge.error.emit(e))
+                     on_progress=lambda pct, info: self.bridge.concat_progress.emit(pct, info),
+                     on_done=lambda o: self.bridge.concat_done.emit(o),
+                     on_error=lambda e: self.bridge.error.emit(e),
+                     proc_holder=self._concat_procs)
+
+    def _concat_done(self, out):
+        self._concat_running = False
+        self._concat_procs = []
+        self.btn_concat_run.setEnabled(True)
+        self.btn_concat_run.setText("选择位置并拼接全片")
+        self.btn_cancel.setEnabled(False)
+        self.lbl_stage.setText("拼接完成")
+        QMessageBox.information(self, APP_TITLE, "无损拼接完成！\n\n" + out)
+        if self.chk_open.isChecked():
+            try:
+                os.startfile(os.path.dirname(os.path.abspath(out)))
+            except Exception:
+                pass
 
     def closeEvent(self, event):
-        if self.job and self.job.is_alive():
+        if (self.job and self.job.is_alive()) or self._concat_running:
             r = QMessageBox.question(self, APP_TITLE, "任务进行中，确定要退出吗？",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if r != QMessageBox.Yes:
                 event.ignore()
                 return
-            self.job.cancel()
+            for proc in self._concat_procs:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            if self.job:
+                self.job.cancel()
         event.accept()
 
 
@@ -1562,6 +1789,7 @@ def main():
                 assert os.path.exists(FFMPEG), "找不到 ffmpeg: " + FFMPEG
                 assert os.path.exists(TSMUXER), "找不到 tsMuxeR: " + TSMUXER
                 assert os.path.exists(FRIMSOURCE), "找不到 FRIMSource: " + FRIMSOURCE
+                assert os.path.exists(MKVMERGE), "找不到 mkvmerge: " + MKVMERGE
                 _p1 = icon_pixmap("chevron-right.svg")
                 _p2 = icon_pixmap("chevron-down.svg")
                 assert _p1 is not None and _p2 is not None, "图标加载失败: " + ICONS_DIR
