@@ -89,7 +89,8 @@ AUDIO_MODES = [
 X265_PRESET = {"quality": "medium", "balanced": "fast", "speed": "veryfast"}
 
 DEMUX_WEIGHT = 3.0
-VIDEO_WEIGHT = 92.0
+VIDEO_WEIGHT = 88.0
+AUDIO_WEIGHT = 4.0
 MUX_WEIGHT = 5.0
 
 if getattr(sys, "frozen", False):
@@ -310,7 +311,8 @@ class ConvertJob(threading.Thread):
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", creationflags=CREATE_NO_WINDOW)
             dur = float(p.stdout.strip())
-            return int(dur * 24000 / 1001) + 1
+            # 保守估算（略小于实际帧数，避免 FRIMSource 请求越界帧）
+            return max(int(dur * 24000 / 1001) - 3, 1)
         except Exception:
             return 0
 
@@ -427,7 +429,7 @@ class ConvertJob(threading.Thread):
             except OSError:
                 pass
 
-        # ---- 阶段 2B：混流 ----
+        # ---- 阶段 2B：先提取音频到独立文件（顺序 I/O，避免 TS 随机读取导致的极慢混流）----
         if self.audio_mode == "none" or not audio_src:
             if os.path.exists(self.out_file):
                 os.remove(self.out_file)
@@ -436,24 +438,60 @@ class ConvertJob(threading.Thread):
         dur = total * 1001.0 / 24000.0 + 0.2
         is_mp4 = self.container == "mp4"
         main_copy_ok = (not is_mp4) or audio_codec in ("aac", "ac3", "mp3")
+        extract_jobs = []
+        if self.audio_mode in ("dual", "copy"):
+            opts = ["-c:a", "copy"] if main_copy_ok else ["-c:a", "ac3", "-b:a", "640k"]
+            extract_jobs.append((os.path.join(self.workdir, "audio_main.mka"), opts))
+        if self.audio_mode in ("dual", "aac_only"):
+            extract_jobs.append((os.path.join(self.workdir, "audio_aac.mka"),
+                                 ["-c:a", "aac", "-b:a", "512k", "-ac", "6"]))
+        audio_files = []
+        base_pct = DEMUX_WEIGHT + VIDEO_WEIGHT
+        for ai, (apath, aopts) in enumerate(extract_jobs):
+            self._log("提取音频 %d/%d ..." % (ai + 1, len(extract_jobs)))
+            cmd = [FFMPEG, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
+                   "-t", "%.3f" % dur, "-i", audio_src,
+                   "-map", "0:a:%d" % audio_idx] + aopts + [apath]
+            p = popen_hidden(cmd)
+            self.proc = p
+            for line in p.stdout:
+                self._check()
+                line = line.strip()
+                if line.startswith("out_time_us="):
+                    try:
+                        sec = int(line.split("=", 1)[1]) / 1e6
+                    except ValueError:
+                        continue
+                    frac = min(sec / max(dur, 1), 1.0)
+                    pct = base_pct + (ai + frac) / len(extract_jobs) * AUDIO_WEIGHT
+                    self.on_progress("audio", pct, "音频提取 %d/%d" % (
+                        ai + 1, len(extract_jobs)))
+                elif line.startswith("progress=") and line.endswith("end"):
+                    break
+                elif "=" not in line and line:
+                    self._log("  ffmpeg: " + line)
+            p.wait()
+            self.proc = None
+            self._check()
+            if p.returncode != 0:
+                raise RuntimeError("音频提取失败（ffmpeg 返回码 %s）" % p.returncode)
+            audio_files.append(apath)
+
+        # ---- 阶段 2C：混流（全部独立文件，纯顺序 I/O，速度快）----
         cmd = [FFMPEG, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
-               "-i", tmp_video, "-t", "%.3f" % dur, "-i", audio_src,
-               "-map", "0:v", "-map", "1:a:%d" % audio_idx]
-        if self.audio_mode == "dual":
-            cmd += ["-map", "1:a:%d" % audio_idx]
-        if self.audio_mode == "aac_only":
-            cmd += ["-c:a", "aac", "-b:a", "512k", "-ac", "6"]
-        elif self.audio_mode == "copy" and main_copy_ok:
-            cmd += ["-c:a", "copy"]
-        elif main_copy_ok:
-            cmd += ["-c:a:0", "copy"]
-        else:
-            cmd += ["-c:a", "ac3", "-b:a", "640k"]
-        if self.audio_mode == "dual":
-            cmd += ["-c:a:1", "aac", "-b:a:1", "512k", "-ac:a:1", "6",
-                    "-metadata:s:a:1", "language=eng",
+               "-i", tmp_video]
+        for a in audio_files:
+            cmd += ["-i", a]
+        cmd += ["-map", "0:v"]
+        for i in range(len(audio_files)):
+            cmd += ["-map", "%d:a" % (i + 1)]
+        cmd += ["-c", "copy"]
+        if len(audio_files) >= 1:
+            cmd += ["-metadata:s:a:0", "language=eng",
+                    "-metadata:s:a:0", "title=Original"]
+        if len(audio_files) >= 2:
+            cmd += ["-metadata:s:a:1", "language=eng",
                     "-metadata:s:a:1", "title=AAC 5.1"]
-        cmd += ["-c:v", "copy"]
         if is_mp4:
             cmd += ["-f", "mp4", "-tag:v", "hvc1", "-movflags", "+faststart"]
         else:
@@ -462,7 +500,7 @@ class ConvertJob(threading.Thread):
 
         p = popen_hidden(cmd)
         self.proc = p
-        base_pct = DEMUX_WEIGHT + VIDEO_WEIGHT
+        base_pct = DEMUX_WEIGHT + VIDEO_WEIGHT + AUDIO_WEIGHT
         for line in p.stdout:
             self._check()
             line = line.strip()
