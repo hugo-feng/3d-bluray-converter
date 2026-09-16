@@ -341,6 +341,9 @@ class ConvertJob(threading.Thread):
                 raise RuntimeError("解流输出文件缺失，请检查源文件")
             cand_left = os.path.join(self.workdir, l264[0])
             cand_right = os.path.join(self.workdir, mvc[0])
+        # 重命名为固定名，便于跳过解流复用
+        left_es = os.path.join(self.workdir, "left.264")
+        right_es = os.path.join(self.workdir, "right.mvc")
         for src, dst in ((cand_left, left_es), (cand_right, right_es)):
             if os.path.normcase(src) != os.path.normcase(dst):
                 if os.path.exists(dst):
