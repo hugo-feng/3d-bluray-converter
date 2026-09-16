@@ -5,7 +5,7 @@
 
 ## 下载
 
-**免安装便携版**（内置全部工具链，解压即用）：
+**免安装便携版**（内置全部工具链，解压即用，约 252 MB）：
 
 https://github.com/hugo-feng/bd3d2sbs/releases/download/v1.9.1/BD3D2SBS_v1.9.1_portable.zip
 
@@ -24,12 +24,14 @@ https://github.com/hugo-feng/bd3d2sbs/releases/download/v1.9.1/BD3D2SBS_v1.9.1_p
 
 ## 使用方法
 
-1. 双击 `BD3D2SBS.exe` 打开软件（Win11 Fluent 深色界面）
+1. 双击 `BD3D2SBS.exe` 打开软件（Win11 Fluent 风格，右上角可切换深色 / 浅色主题）
 2. 「左眼文件」→ 浏览选择 `BDMV\STREAM\00000.m2ts`（右眼会自动配对）
-3. 「输出到」→ 选择保存路径（所在磁盘需 ≥ 45 GB 空闲空间，**建议用纯英文路径**）
+3. 「输出到」→ 选择保存路径（下方会**实时预估成品大小**；正式开始前会自动检查磁盘空间是否足够）
 4. 按需展开「输出格式 / 编码设置 / 音频 / 高级」调整参数（收起时右侧显示当前配置摘要）
-5. 点击「开始转换」，进度区显示总进度、帧率与预计剩余时间
-6. 若影片分两张碟，分别转换后用「无损拼接（完整片）」合并
+5. 点击「开始转换」——开始前先做**编码器可用性预检**（约 1 秒），
+   进度区实时显示 解流中 / 编码中 / 音频提取 / 混流封装 与预计剩余时间
+6. 若影片分两张碟：分别在「无损拼接」区选择**第一段、第二段、保存位置**，
+   点「开始拼接」合成完整片（不重编码，速度仅受磁盘限制，按钮左侧显示预计全片大小）
 
 **关于中文路径**：软件所在的目录必须全英文（否则内置解码器无法加载）。
 如果输出路径含中文字符，软件会自动把中间文件放到同盘根目录（日志中有提示）；
@@ -43,20 +45,35 @@ https://github.com/hugo-feng/bd3d2sbs/releases/download/v1.9.1/BD3D2SBS_v1.9.1_p
 
 - **4 种 3D 布局**：全宽 SBS 3840×1080（AR 眼镜推荐）/ 半宽 SBS 1920×1080 /
   全高 TAB 1920×2160 / 半高 TAB 1920×1080
-- **编码器**：AMD GPU 硬编 HEVC（快，推荐，约为 CPU x265 的 10 倍） / CPU x265
+- **编码器**：AMD AMF（A 卡）/ NVIDIA NVENC（N 卡）/ Intel QSV（I 卡）/ CPU x265
+  - 启动时自动检测显卡并选择匹配的编码器（老配置升级后同样生效）
+  - **内置 2 个 FFmpeg 版本**：最新 master（需 NVIDIA 驱动 610+）与兼容版 8.0（需 570+），
+    按显卡驱动版本**自动匹配**；也可在「高级 → FFmpeg 版本」手动指定
+  - **编码器可用性预检**：开始前 3 帧测试编码，不可用立即提示（不会浪费解流时间）
 - **质量模式**：恒定质量 CQP/CRF、目标平均码率、固定码率；4 档预设或自定义
 - **编码速度**：质量优先 / 平衡 / 速度优先；可自定义关键帧间隔
 - **音轨**：自动探测原盘全部音轨，可指定主音轨；输出模式支持
   原声 + AAC 兼容轨（推荐，手机也能放）/ 仅原声无损直通 / 仅 AAC / 无音轨
 - **容器**：MKV（支持 DTS 原声）/ MP4（手机兼容性最好，自动处理音轨转码）
-- 磁盘空间预检、完成后自动打开输出目录、参数自动记忆
-- 深色专业界面、设置区折叠、窗口缩放流畅
+- **无损拼接**：两段（如双碟）分别导入 + 选择保存位置 → 一键合成完整片；
+  mkvmerge 直封装不重编码，音轨 / 字幕 / 章节全部保留；
+  先写临时文件成功后原子替换，中途失败不会破坏已有文件
+- **大小预估**：选择左右眼后实时预估成品大小；拼接时实时显示全片预计大小
+- **进度与倒计时**：解流 / 编码 / 音频 / 混流各阶段实时进度、帧率与剩余时间
+- 智能磁盘空间预检（按源大小 + 预估成品计算）、完成后自动打开输出目录、参数自动记忆
+- 深色 / 浅色主题一键切换、设置区折叠、平滑滚动、圆角控件、窗口比例自适应屏幕
 
 ## 环境要求
 
-- Windows 10/11 x64
-- AMD 显卡（RDNA 架构，支持 HEVC 硬件编码）
-- Python 3.10+（仅源码运行需要；EXE 版免安装）
+- **系统**：Windows 10 / 11 x64
+- **显卡**（任一即可，均为硬件加速）：
+  - AMD 显卡（AMF 硬编 HEVC）
+  - NVIDIA 显卡（NVENC 硬编 HEVC；驱动 570+ 使用兼容版 FFmpeg，驱动 610+ 可用最新版）
+  - Intel 核显 / 独显（QSV 硬编 HEVC）
+  - 无兼容显卡时可用 CPU x265（速度较慢）
+- **磁盘空间**：转换需要「解流中间文件（≈源文件大小）+ 成品（软件会预估）」两份额度，
+  正式开始前软件会自动预检并给出明确提示
+- **Python 3.10+**（仅源码运行需要；EXE 便携版免安装、免环境）
 
 ## 工具链
 
@@ -68,10 +85,13 @@ powershell -ExecutionPolicy Bypass -File download_tools.ps1
 
 | 工具 | 用途 | 来源 |
 |---|---|---|
-| ffmpeg (BtbN build) | 编码 / 混流 | github.com/BtbN/FFmpeg-Builds |
+| ffmpeg ×2（master + 8.0 兼容版） | 编码 / 混流（按显卡驱动匹配） | github.com/BtbN/FFmpeg-Builds |
 | tsMuxeR | 蓝光 3D 解流 | github.com/justdan96/tsMuxer |
 | AviSynth+ | 帧服务器 | github.com/AviSynth/AviSynthPlus |
 | FRIMSource / libmfxsw | MVC (H.264 双视图) 解码 | BD3D2MK3D 发布包内置 |
+| MKVToolNix (mkvmerge) | 无损拼接 | github.com/MKVToolNix/MKVToolNix |
+
+> 便携包内的 FFmpeg 位于 `bin/ffmpeg/master/` 与 `bin/ffmpeg/8.0/` 两个目录。
 
 ## 命令行模式
 
@@ -81,17 +101,17 @@ python bd3d2sbs.py --cli ^
   --right "G:\...\BDMV\STREAM\00001.m2ts" ^
   --out "G:\output\movie.mkv" ^
   [--layout full_sbs|half_sbs|full_tab|half_tab] ^
-  [--container mkv|mp4] [--encoder gpu|cpu] ^
+  [--container mkv|mp4] [--encoder amf|nvenc|qsv|cpu] [--ffver master|8.0] ^
   [--quality 0-3] [--bitrate 20] [--frames N] [--noaudio] [--skipdemux]
 ```
 
 ## 打包 EXE
 
 ```powershell
-python -m pip install pyinstaller
+python -m pip install pyinstaller pyside6
 python -m PyInstaller --noconfirm --onedir --windowed --name BD3D2SBS ^
-  --icon app.ico --add-data "app.ico;." bd3d2sbs.py
-# 然后把 bin\ 复制到 dist\BD3D2SBS\bin\
+  --icon app.ico --add-data "app.ico;." --add-data "icons;icons" bd3d2sbs.py
+# 然后把 bin\ 整体复制到 dist\BD3D2SBS\bin\（含 ffmpeg\master、ffmpeg\8.0、AviSynth.dll 等）
 ```
 
 ## 工作原理
@@ -107,9 +127,12 @@ left.264（左眼基础视图） + right.mvc（右眼依赖视图）
   │  StackHorizontal / StackVertical + 可选缩放
   ▼
 SBS / TAB 立体帧
-  │  ffmpeg hevc_amf 硬件编码
+  │  ffmpeg 硬件编码：hevc_amf / hevc_nvenc / hevc_qsv，或 CPU libx265
   ▼
 HEVC 视频（含原版音轨 + AAC 兼容轨）
+
+双碟完整片：
+两段成品 ── mkvmerge 直封装（+）── 完整片（无损、保留音轨/字幕/章节）
 ```
 
 ## 免责声明
@@ -129,5 +152,5 @@ HEVC 视频（含原版音轨 + AAC 兼容轨）
 - **商标声明**：文中提及的所有商标、产品名称及公司名称均为其各自所有者的财产，
   仅用于说明性目的。
 - **第三方组件**：本工具内置或依赖 ffmpeg、tsMuxeR、AviSynth+、FRIM (FRIMSource)、
-  Qt / PySide6、Tabler Icons、7-Zip 等开源组件，其版权与许可归各自项目所有
+  MKVToolNix、Qt / PySide6、Tabler Icons 等开源组件，其版权与许可归各自项目所有
   （详见上文「工具链」章节）。
