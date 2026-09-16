@@ -942,27 +942,7 @@ class App:
                 pywinstyles.apply_style(self.root, "dark")
             except Exception:
                 pass
-        self._enable_double_buffer()
         self.logline("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
-
-    def _enable_double_buffer(self):
-        """Windows 双缓冲（WS_EX_COMPOSITED）：消除最大化/缩放时的整窗重绘闪烁"""
-        if os.name != "nt" or os.environ.get("BD3D_NO_COMPOSITED") == "1":
-            return
-        try:
-            import ctypes
-            self.root.update_idletasks()
-            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-            user32 = ctypes.windll.user32
-            GWL_EXSTYLE = -20
-            WS_EX_COMPOSITED = 0x02000000
-            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_COMPOSITED)
-            # 让扩展样式立即生效（需要一次窗口刷新）
-            self.root.withdraw()
-            self.root.after(20, self.root.deiconify)
-        except Exception:
-            pass
 
     # ---------- 主题 ----------
     def _set_dark_titlebar(self):
