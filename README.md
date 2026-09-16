@@ -3,6 +3,14 @@
 把 **3D 蓝光原盘** 转换成 **SBS / TAB 立体视频**（HEVC，AMD GPU 硬件编码），
 供 AR 眼镜 / VR 头显 / 3D 电视观看。
 
+## 下载
+
+**免安装便携版**（内置全部工具链，解压即用）：
+
+https://github.com/hugo-feng/bd3d2sbs/releases/download/v1.7.0/BD3D2SBS_v1.7.0_portable.zip
+
+> 解压到**纯英文路径**，双击 `BD3D2SBS.exe` 运行。需要 Windows 10/11 x64。
+
 ## 源文件说明
 
 3D 蓝光原盘在 `BDMV\STREAM` 目录下有两个视频流文件：
