@@ -92,10 +92,23 @@ FFPROBE = os.path.join(BIN_DIR, "ffprobe.exe")
 TSMUXER = os.path.join(BIN_DIR, "tsMuxeR.exe")
 FRIMSOURCE = os.path.join(BIN_DIR, "FRIMSource.dll")
 ICON_PATH = os.path.join(_ICO_BASE, "app.ico")
+ICONS_DIR = os.path.join(_ICO_BASE, "icons")
 CONFIG_PATH = os.path.join(_CFG_BASE, "config.json")
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
-QSS = """
+
+def icon_pixmap(name, size=16):
+    """加载开源图标（Tabler Icons, MIT）"""
+    try:
+        pm = QIcon(os.path.join(ICONS_DIR, name)).pixmap(size, size)
+        if not pm.isNull():
+            return pm
+    except Exception:
+        pass
+    return None
+
+
+QSS_TEMPLATE = """
 QWidget { background: #17181c; color: #e8e9ed;
           font-family: "Microsoft YaHei UI"; font-size: 10.5pt; }
 QFrame#card { background: #202127; border: 1px solid #2e3038; border-radius: 8px; }
@@ -103,12 +116,19 @@ QLabel { background: transparent; }
 QLineEdit { background: #2a2c34; border: 1px solid #2e3038; border-radius: 6px;
             padding: 5px 8px; color: #e8e9ed; }
 QLineEdit:focus { border: 1px solid #3574f0; }
-QLineEdit:disabled { color: #6b6d78; }
+QLineEdit:disabled { color: #6b6d78; background: #24262c; }
 QComboBox { background: #2a2c34; border: 1px solid #2e3038; border-radius: 6px;
-            padding: 4px 8px; color: #e8e9ed; }
-QComboBox::drop-down { border: none; width: 22px; }
+            padding: 4px 30px 4px 8px; color: #e8e9ed; }
+QComboBox:hover { border: 1px solid #3d4149; }
+QComboBox:focus { border: 1px solid #3574f0; }
+QComboBox:disabled { color: #6b6d78; background: #24262c; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center right;
+                       width: 26px; border: none; background: transparent; }
+QComboBox::down-arrow { image: url("<ICONS>/chevron-down.svg");
+                        width: 16px; height: 16px; }
 QComboBox QAbstractItemView { background: #202127; border: 1px solid #2e3038;
-            selection-background-color: #3574f0; outline: none; color: #e8e9ed; }
+            selection-background-color: #3574f0; outline: none; color: #e8e9ed;
+            padding: 4px; }
 QPushButton { background: #33363e; border: 1px solid #2e3038; border-radius: 6px;
               padding: 6px 14px; color: #e8e9ed; }
 QPushButton:hover { background: #3d4149; }
@@ -455,7 +475,7 @@ class ConvertJob(threading.Thread):
             tail = "StackVertical(left, right).LanczosResize(1920, 1080)\n"
         avs = ('LoadPlugin("%s")\n'
                'interleaved = FRIMSource("mvc", "%s", "%s", layout="alt", '
-               'num_frames=%d, cache=2, platform="sw")\n'
+               'num_frames=%d, cache=1, platform="sw")\n'
                'left  = SelectEven(interleaved)\n'
                'right = SelectOdd(interleaved)\n'
                '%s' % (safe_plugin_path(FRIMSOURCE), base, dep, nframes, tail))
@@ -698,9 +718,14 @@ class Section(QFrame):
         self._head.setCursor(Qt.PointingHandCursor)
         h = QHBoxLayout(self._head)
         h.setContentsMargins(0, 3, 0, 3)
-        self._arrow = QLabel("›")
-        self._arrow.setFixedWidth(14)
-        self._arrow.setStyleSheet("color:#9a9ca8;")
+        self._arrow = QLabel()
+        self._arrow.setFixedWidth(18)
+        _pm = icon_pixmap("chevron-right.svg", 16)
+        if _pm is not None:
+            self._arrow.setPixmap(_pm)
+        else:
+            self._arrow.setText("›")
+            self._arrow.setStyleSheet("color:#9a9ca8;")
         self._title = QLabel(title)
         self._title.setStyleSheet("font-weight:600;")
         self._sum = QLabel("")
@@ -727,7 +752,12 @@ class Section(QFrame):
 
     def toggle(self):
         self._expanded = not self._expanded
-        self._arrow.setText("⌄" if self._expanded else "›")
+        _pm = icon_pixmap("chevron-down.svg" if self._expanded
+                          else "chevron-right.svg", 16)
+        if _pm is not None:
+            self._arrow.setPixmap(_pm)
+        else:
+            self._arrow.setText("⌄" if self._expanded else "›")
         self.body.setVisible(self._expanded)
         self._sum.setText("" if self._expanded else self._summary)
 
@@ -1257,7 +1287,7 @@ def main():
         job.run()
         return 0
     app = QApplication(sys.argv)
-    app.setStyleSheet(QSS)
+    app.setStyleSheet(QSS_TEMPLATE.replace("<ICONS>", ICONS_DIR.replace("\\", "/")))
     win = MainWindow()
     win.show()
     if "--selftest" in args:
@@ -1271,6 +1301,9 @@ def main():
                 assert os.path.exists(FFMPEG), "找不到 ffmpeg: " + FFMPEG
                 assert os.path.exists(TSMUXER), "找不到 tsMuxeR: " + TSMUXER
                 assert os.path.exists(FRIMSOURCE), "找不到 FRIMSource: " + FRIMSOURCE
+                _p1 = icon_pixmap("chevron-right.svg")
+                _p2 = icon_pixmap("chevron-down.svg")
+                assert _p1 is not None and _p2 is not None, "图标加载失败: " + ICONS_DIR
                 msg = "SELFTEST OK"
             except Exception as e:
                 msg = "SELFTEST FAIL: %s" % e
