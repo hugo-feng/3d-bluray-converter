@@ -6,7 +6,8 @@ BD3D -> SBS 3D 视频转换器
 
 用法：
   GUI  : python bd3d2sbs.py
-  CLI  : python bd3d2sbs.py --cli --mpls "xxx.mpls" --out "xxx.mkv" [--frames N] [--quality 1] [--noaudio]
+  CLI  : python bd3d2sbs.py --cli --mpls "xxx.mpls" --out "xxx.mkv"
+         [--frames N] [--quality 0-2] [--noaudio] [--skipdemux]
 """
 import os
 import re
@@ -15,11 +16,34 @@ import json
 import time
 import threading
 import subprocess
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from tkinter.scrolledtext import ScrolledText
+from tkinter import filedialog, messagebox
 
-APP_TITLE = "BD3D -> SBS 3D 视频转换器 v1.0"
+import customtkinter as ctk
+
+APP_TITLE = "BD3D → SBS 转换器"
+APP_VERSION = "v1.1"
+
+# ---- 界面配色（深色专业风格）----
+C_BG = "#17181c"
+C_CARD = "#202127"
+C_BORDER = "#2e3038"
+C_INPUT = "#2a2c34"
+C_TEXT = "#e8e9ed"
+C_DIM = "#9a9ca8"
+C_ACCENT = "#3574f0"
+C_ACCENT_H = "#2b5fd0"
+C_BTN2 = "#33363e"
+C_BTN2_H = "#3d4149"
+C_LOG_BG = "#121317"
+
+F_TITLE = ("Microsoft YaHei UI", 17, "bold")
+F_CARDT = ("Microsoft YaHei UI", 12, "bold")
+F_LABEL = ("Microsoft YaHei UI", 12)
+F_BTN = ("Microsoft YaHei UI", 12, "bold")
+F_BIG = ("Microsoft YaHei UI", 24, "bold")
+F_STAT = ("Microsoft YaHei UI", 12)
+F_MONO = ("Consolas", 10)
+
 if getattr(sys, "frozen", False):
     # PyInstaller 打包后：资源在 _MEIPASS，配置写在 exe 旁边
     _BIN_BASE = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
@@ -57,7 +81,7 @@ def popen_hidden(cmd):
 
 
 class ConvertJob(threading.Thread):
-    """单个片段的完整转换任务（解流 -> 编码 -> 混流）"""
+    """单个片段的完整转换任务（解流 -> 视频编码 -> 混流）"""
 
     def __init__(self, mpls, out_mkv, qp_i, qp_p, max_frames=0, no_audio=False,
                  skip_demux=False,
@@ -113,15 +137,15 @@ class ConvertJob(threading.Thread):
             base = os.path.join(self.workdir, name + ".track_4113.264")
             dep = os.path.join(self.workdir, name + ".track_4114.mvc")
             if self.skip_demux and os.path.exists(base) and os.path.exists(dep):
-                self._log("[1/2] 跳过解流（使用已有流文件）")
+                self._log("[1/3] 跳过解流（使用已有流文件）")
                 nframes = self._estimate_frames()
             else:
-                self._log("[1/2] 解流（tsMuxeR）：" + self.mpls)
+                self._log("[1/3] 解流（tsMuxeR）：" + self.mpls)
                 base, dep, nframes = self._demux(name)
             if nframes <= 0:
-                # 兜底：用时长估算
                 nframes = self._estimate_frames()
-            self._log("解流完成：%d 帧，开始编码（FRIMSource 解码 + AMD GPU 编码）" % nframes)
+            if nframes > 0:
+                self._log("解流完成：%d 帧，开始视频编码（FRIMSource 解码 + GPU 编码）" % nframes)
             audio_src, audio_idx = (None, None) if self.no_audio else self._probe_audio(name)
             if audio_src:
                 self._log("音轨：%s（音频流 #%d）" % (os.path.basename(audio_src), audio_idx))
@@ -259,7 +283,7 @@ class ConvertJob(threading.Thread):
                 speed = cur / max(time.time() - t0, 0.001)
                 remain = (total - cur) / speed if speed > 0.01 else 0
                 pct = DEMUX_WEIGHT + (cur / max(total, 1)) * VIDEO_WEIGHT
-                info = "%d/%d 帧 | %.0f fps | 剩余约 %s" % (
+                info = "%d/%d 帧 · %.0f fps · 剩余约 %s" % (
                     cur, total, speed, fmt_time(remain))
                 self.on_progress("encode", pct, info)
             elif line.startswith("progress=") and line.endswith("end"):
@@ -307,8 +331,9 @@ class ConvertJob(threading.Thread):
                     sec = int(line.split("=", 1)[1]) / 1e6
                 except ValueError:
                     continue
-                pct = base_pct + min(sec / max(dur, 1), 1.0) * MUX_WEIGHT
-                self.on_progress("mux", pct, "混流中 %.0f%%" % (sec / max(dur, 1) * 100))
+                frac = min(sec / max(dur, 1), 1.0)
+                pct = base_pct + frac * MUX_WEIGHT
+                self.on_progress("mux", pct, "混流封装中 %.0f%%" % (frac * 100))
             elif line.startswith("progress=") and line.endswith("end"):
                 break
             elif "=" not in line and line:
@@ -364,70 +389,136 @@ def concat_mkvs(files, out_mkv, on_log=None, on_done=None, on_error=None):
 
 # ==================== GUI ====================
 class App:
-    def __init__(self, root):
+    def __init__(self, root: "ctk.CTk"):
         self.root = root
         self.job = None
         self.cfg = self._load_cfg()
+
         root.title(APP_TITLE)
-        root.geometry("820x620")
-        root.minsize(760, 560)
+        root.geometry("940x730")
+        root.minsize(880, 660)
+        root.configure(fg_color=C_BG)
 
-        frm = ttk.Frame(root, padding=10)
-        frm.pack(fill="both", expand=True)
+        # ---------- 顶栏 ----------
+        top = ctk.CTkFrame(root, fg_color="transparent")
+        top.pack(fill="x", padx=20, pady=(16, 2))
+        ctk.CTkLabel(top, text=APP_TITLE, font=F_TITLE, text_color=C_TEXT).pack(side="left")
+        ctk.CTkLabel(top, text=APP_VERSION, font=("Microsoft YaHei UI", 11),
+                     text_color=C_DIM).pack(side="left", padx=(8, 0), pady=(5, 0))
+        ctk.CTkLabel(top, text="3D 蓝光 → 左右并排 HEVC · GPU 硬件加速",
+                     font=("Microsoft YaHei UI", 11), text_color=C_DIM
+                     ).pack(side="right", pady=(5, 0))
 
-        row = 0
-        ttk.Label(frm, text="源文件（BDMV\\PLAYLIST 下的 .mpls）").grid(row=row, column=0, sticky="w")
-        row += 1
-        self.var_mpls = tk.StringVar(value=self.cfg.get("mpls", ""))
-        ttk.Entry(frm, textvariable=self.var_mpls).grid(row=row, column=0, sticky="ew", pady=2)
-        ttk.Button(frm, text="浏览...", command=self.pick_mpls).grid(row=row, column=1, padx=4)
+        # ---------- 源与输出 ----------
+        body = self._card(root, "源与输出")
+        self.var_mpls = ctk.StringVar(value=self.cfg.get("mpls", ""))
+        self._file_row(body, "源文件", self.var_mpls, self.pick_mpls,
+                       hint="BDMV\\PLAYLIST 下的 .mpls")
+        self.var_out = ctk.StringVar(value=self.cfg.get("out", ""))
+        self._file_row(body, "输出到", self.var_out, self.pick_out,
+                       hint="建议输出到剩余空间 ≥ 45 GB 的磁盘")
 
-        row += 1
-        ttk.Label(frm, text="输出文件（.mkv）").grid(row=row, column=0, sticky="w", pady=(8, 0))
-        row += 1
-        self.var_out = tk.StringVar(value=self.cfg.get("out", ""))
-        ttk.Entry(frm, textvariable=self.var_out).grid(row=row, column=0, sticky="ew", pady=2)
-        ttk.Button(frm, text="浏览...", command=self.pick_out).grid(row=row, column=1, padx=4)
+        # ---------- 输出参数 ----------
+        body = self._card(root, "输出参数")
+        row = ctk.CTkFrame(body, fg_color="transparent")
+        row.pack(fill="x", pady=3)
+        ctk.CTkLabel(row, text="画质", width=56, anchor="w", font=F_LABEL,
+                     text_color=C_TEXT).pack(side="left")
+        self.var_q = ctk.StringVar(value=self.cfg.get("quality", QUALITY_PRESETS[0][0]))
+        ctk.CTkOptionMenu(
+            row, variable=self.var_q, values=[q[0] for q in QUALITY_PRESETS],
+            width=190, fg_color=C_INPUT, button_color=C_INPUT,
+            button_hover_color=C_BTN2_H, text_color=C_TEXT,
+            dropdown_fg_color=C_CARD, dropdown_text_color=C_TEXT,
+            dropdown_hover_color=C_BTN2_H, corner_radius=6, font=F_LABEL
+        ).pack(side="left", padx=(8, 20))
+        self.var_noaudio = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(row, text="仅视频", variable=self.var_noaudio,
+                        fg_color=C_ACCENT, hover_color=C_ACCENT_H, text_color=C_DIM,
+                        font=F_LABEL, corner_radius=4, width=20, height=20,
+                        checkbox_width=20, checkbox_height=20).pack(side="left")
+        ctk.CTkLabel(row, text="限制帧数（调试）", font=F_LABEL, text_color=C_DIM
+                     ).pack(side="left", padx=(24, 8))
+        self.var_frames = ctk.StringVar(value="")
+        ctk.CTkEntry(row, textvariable=self.var_frames, width=80, fg_color=C_INPUT,
+                     border_color=C_BORDER, text_color=C_TEXT, corner_radius=6
+                     ).pack(side="left")
 
-        row += 1
-        opt = ttk.Frame(frm)
-        opt.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Label(opt, text="画质：").pack(side="left")
-        self.var_q = tk.StringVar(value=self.cfg.get("quality", QUALITY_PRESETS[1][0]))
-        ttk.Combobox(opt, textvariable=self.var_q, values=[q[0] for q in QUALITY_PRESETS],
-                     state="readonly", width=22).pack(side="left")
-        self.var_noaudio = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt, text="无音轨（仅视频）", variable=self.var_noaudio).pack(side="left", padx=16)
-        self.var_frames = tk.StringVar(value="")
-        ttk.Label(opt, text="限制帧数(调试):").pack(side="left")
-        ttk.Entry(opt, textvariable=self.var_frames, width=8).pack(side="left")
-
-        row += 1
-        btns = ttk.Frame(frm)
-        btns.grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
-        self.btn_start = ttk.Button(btns, text="开始转换", command=self.start)
+        # ---------- 操作按钮 ----------
+        btns = ctk.CTkFrame(root, fg_color="transparent")
+        btns.pack(fill="x", padx=20, pady=(10, 4))
+        self.btn_start = ctk.CTkButton(
+            btns, text="开始转换", command=self.start, width=130, height=36,
+            fg_color=C_ACCENT, hover_color=C_ACCENT_H, text_color="#ffffff",
+            font=F_BTN, corner_radius=8)
         self.btn_start.pack(side="left")
-        self.btn_cancel = ttk.Button(btns, text="取消", command=self.cancel, state="disabled")
-        self.btn_cancel.pack(side="left", padx=6)
-        ttk.Button(btns, text="拼接两个 MKV（无损合并）", command=self.concat).pack(side="left", padx=20)
+        self.btn_cancel = ctk.CTkButton(
+            btns, text="取消", command=self.cancel, width=90, height=36,
+            fg_color=C_BTN2, hover_color=C_BTN2_H, text_color=C_TEXT,
+            font=F_LABEL, corner_radius=8, state="disabled")
+        self.btn_cancel.pack(side="left", padx=10)
+        ctk.CTkButton(
+            btns, text="无损拼接 MKV", command=self.concat, width=130, height=36,
+            fg_color="transparent", hover_color=C_BTN2, text_color=C_DIM,
+            border_width=1, border_color=C_BORDER, font=F_LABEL, corner_radius=8
+        ).pack(side="right")
 
-        row += 1
-        ttk.Label(frm, text="总进度").grid(row=row, column=0, sticky="w")
-        row += 1
-        self.pb = ttk.Progressbar(frm, maximum=100.0)
-        self.pb.grid(row=row, column=0, columnspan=2, sticky="ew", pady=2)
+        # ---------- 进度 ----------
+        body = self._card(root, "进度")
+        head = ctk.CTkFrame(body, fg_color="transparent")
+        head.pack(fill="x")
+        self.lbl_pct = ctk.CTkLabel(head, text="0.0%", font=F_BIG, text_color=C_TEXT)
+        self.lbl_pct.pack(side="left")
+        self.lbl_stage = ctk.CTkLabel(head, text="就绪", font=F_STAT, text_color=C_DIM)
+        self.lbl_stage.pack(side="left", padx=(16, 0), pady=(10, 0))
+        self.pb = ctk.CTkProgressBar(body, height=10, progress_color=C_ACCENT,
+                                     fg_color=C_INPUT, corner_radius=5)
+        self.pb.set(0)
+        self.pb.pack(fill="x", pady=(8, 4))
+        self.lbl_stat = ctk.CTkLabel(body, text=" ", font=F_STAT, text_color=C_DIM,
+                                     anchor="w")
+        self.lbl_stat.pack(fill="x")
 
-        row += 1
-        self.var_stage = tk.StringVar(value="就绪")
-        ttk.Label(frm, textvariable=self.var_stage).grid(row=row, column=0, columnspan=2, sticky="w")
+        # ---------- 日志 ----------
+        body = self._card(root, "日志", expand=True)
+        self.log = ctk.CTkTextbox(body, height=170, font=F_MONO, fg_color=C_LOG_BG,
+                                  text_color="#c8cad2", corner_radius=6,
+                                  border_width=1, border_color=C_BORDER,
+                                  scrollbar_button_color="#3a3d46")
+        self.log.pack(fill="both", expand=True)
+        self.log.configure(state="disabled")
 
-        row += 1
-        ttk.Label(frm, text="日志").grid(row=row, column=0, sticky="w", pady=(8, 0))
-        row += 1
-        self.log = ScrolledText(frm, height=14, state="disabled")
-        self.log.grid(row=row, column=0, columnspan=2, sticky="nsew")
-        frm.columnconfigure(0, weight=1)
-        frm.rowconfigure(row, weight=1)
+        self.logline("就绪。选择 .mpls 源文件与输出路径后点击「开始转换」。")
+
+    # ---------- UI 工具 ----------
+    def _card(self, parent, title, expand=False):
+        card = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=10,
+                            border_width=1, border_color=C_BORDER)
+        card.pack(fill="both" if expand else "x", expand=expand,
+                  padx=20, pady=6)
+        ctk.CTkLabel(card, text=title, font=F_CARDT, text_color=C_DIM
+                     ).pack(anchor="w", padx=14, pady=(10, 4))
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.pack(fill="both" if expand else "x", expand=expand,
+                  padx=14, pady=(0, 12))
+        return body
+
+    def _file_row(self, parent, label, var, browse_cmd, hint=""):
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=3)
+        ctk.CTkLabel(row, text=label, width=56, anchor="w", font=F_LABEL,
+                     text_color=C_TEXT).pack(side="left")
+        ctk.CTkEntry(row, textvariable=var, fg_color=C_INPUT,
+                     border_color=C_BORDER, text_color=C_TEXT,
+                     corner_radius=6).pack(side="left", fill="x", expand=True,
+                                           padx=(8, 8))
+        ctk.CTkButton(row, text="浏览", width=64, height=30, command=browse_cmd,
+                      fg_color=C_BTN2, hover_color=C_BTN2_H, text_color=C_TEXT,
+                      font=F_LABEL, corner_radius=6).pack(side="left")
+        if hint:
+            ctk.CTkLabel(parent, text=hint, font=("Microsoft YaHei UI", 10),
+                         text_color="#6b6d78", anchor="w"
+                         ).pack(fill="x", padx=(64, 0), pady=(0, 2))
 
     # ---------- 配置 ----------
     def _load_cfg(self):
@@ -472,9 +563,11 @@ class App:
         self.log.configure(state="disabled")
 
     def _set_progress(self, pct, info):
-        self.pb["value"] = pct
-        self.var_stage.set("%.1f%%  |  %s" % (pct, info))
+        self.pb.set(max(0.0, min(pct, 100.0)) / 100.0)
+        self.lbl_pct.configure(text="%.1f%%" % pct)
+        self.lbl_stat.configure(text=info)
 
+    # ---------- 任务 ----------
     def start(self):
         if self.job and self.job.is_alive():
             return
@@ -496,31 +589,41 @@ class App:
         self._save_cfg()
         self.btn_start.configure(state="disabled")
         self.btn_cancel.configure(state="normal")
-        self.logline("开始任务：%s -> %s" % (os.path.basename(mpls), out))
+        self.lbl_stage.configure(text="准备中")
+        self.logline("开始任务：%s" % os.path.basename(mpls))
+        self.logline("输出：%s" % out)
         self.job = ConvertJob(
             mpls, out, qp_i, qp_p, max_frames, self.var_noaudio.get(),
             on_log=lambda s: self.root.after(0, self.logline, s),
             on_progress=lambda st, pct, info: self.root.after(
-                0, self._set_progress, pct, info),
+                0, self._on_stage, pct, info),
             on_done=lambda o: self.root.after(0, self.done, o),
             on_error=lambda e: self.root.after(0, self.fail, e))
         self.job.start()
 
+    def _on_stage(self, pct, info):
+        self._set_progress(pct, info)
+        if self.job:
+            stages = {"demux": "解流", "encode": "视频编码", "mux": "混流封装"}
+        self.lbl_stage.configure(text="处理中")
+
     def cancel(self):
         if self.job:
             self.logline("正在取消...")
+            self.lbl_stage.configure(text="正在取消")
             self.job.cancel()
 
     def done(self, out):
         self.btn_start.configure(state="normal")
         self.btn_cancel.configure(state="disabled")
-        self._set_progress(100.0, "完成：" + out)
+        self.lbl_stage.configure(text="完成")
+        self._set_progress(100.0, "输出：" + out)
         messagebox.showinfo(APP_TITLE, "转换完成！\n\n" + out)
 
     def fail(self, err):
         self.btn_start.configure(state="normal")
         self.btn_cancel.configure(state="disabled")
-        self.var_stage.set("失败：" + err)
+        self.lbl_stage.configure(text="失败")
         if err != "已取消":
             messagebox.showerror(APP_TITLE, "任务失败：\n" + err)
 
@@ -535,8 +638,8 @@ class App:
             filetypes=[("Matroska 视频", "*.mkv")])
         if not out:
             return
-        self.logline("开始拼接 %d 个文件 -> %s" % (len(files), out))
-        self._set_progress(0.0, "拼接中...")
+        self.logline("开始拼接 %d 个文件" % len(files))
+        self.lbl_stage.configure(text="拼接中")
         concat_mkvs(list(files), out,
                     on_log=lambda s: self.root.after(0, self.logline, s),
                     on_done=lambda o: self.root.after(0, self._concat_done, o),
@@ -544,6 +647,7 @@ class App:
 
     def _concat_done(self, out):
         self._set_progress(100.0, "拼接完成：" + out)
+        self.lbl_stage.configure(text="完成")
         messagebox.showinfo(APP_TITLE, "拼接完成！\n\n" + out)
 
 
@@ -563,7 +667,7 @@ def main():
         qp_i, qp_p = QUALITY_PRESETS[max(0, min(qidx, len(QUALITY_PRESETS) - 1))][1:]
         if not mpls or not out:
             print("用法: python bd3d2sbs.py --cli --mpls x.mpls --out x.mkv "
-                  "[--frames N] [--quality 0-2] [--noaudio]")
+                  "[--frames N] [--quality 0-2] [--noaudio] [--skipdemux]")
             return 1
         job = ConvertJob(mpls, out, qp_i, qp_p, frames, noaudio, skipdemux,
                          on_log=lambda s: print(s, flush=True),
@@ -571,10 +675,11 @@ def main():
                              "[%5.1f%%] %s %s" % (pct, st, info), flush=True))
         job.run()
         return 0
-    root = tk.Tk()
+    ctk.set_appearance_mode("dark")
+    root = ctk.CTk()
     App(root)
     if "--selftest" in args:
-        root.after(500, root.destroy)
+        root.after(600, root.destroy)
     root.mainloop()
     return 0
 
