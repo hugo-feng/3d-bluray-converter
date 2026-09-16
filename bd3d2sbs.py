@@ -109,8 +109,9 @@ def icon_pixmap(name, size=16):
 
 
 QSS_TEMPLATE = """
-QWidget { background: #17181c; color: #e8e9ed;
+QWidget { color: #e8e9ed;
           font-family: "Microsoft YaHei UI"; font-size: 10.5pt; }
+#mainwin { background: #17181c; }
 QFrame#card { background: #202127; border: 1px solid #2e3038; border-radius: 8px; }
 QLabel { background: transparent; }
 QLineEdit { background: #2a2c34; border: 1px solid #2e3038; border-radius: 6px;
@@ -780,6 +781,7 @@ class MainWindow(QWidget):
         self.bridge.error.connect(self._fail)
 
         self.setWindowTitle(APP_TITLE)
+        self.setObjectName("mainwin")
         self.resize(900, 800)
         self.setMinimumSize(800, 640)
         try:
