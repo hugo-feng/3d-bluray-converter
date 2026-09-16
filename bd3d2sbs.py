@@ -124,6 +124,8 @@ QSS_TEMPLATE = """
 QWidget { color: #e8e9ed;
           font-family: "Microsoft YaHei UI"; font-size: 10.5pt; }
 #mainwin { background: #17181c; }
+QScrollArea { border: none; background: #17181c; }
+#scrollcontent { background: #17181c; }
 QFrame#card { background: #202127; border: 1px solid #2e3038; border-radius: 8px; }
 QLabel { background: transparent; }
 QLineEdit { background: #2a2c34; border: 1px solid #2e3038; border-radius: 6px;
@@ -820,11 +822,9 @@ class MainWindow(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: #17181c; }")
         outer.addWidget(scroll, 1)
         content = QWidget()
         content.setObjectName("scrollcontent")
-        content.setStyleSheet("background: #17181c;")
         scroll.setWidget(content)
 
         root = QVBoxLayout(content)
