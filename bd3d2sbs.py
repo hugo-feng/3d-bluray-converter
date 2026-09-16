@@ -912,6 +912,7 @@ class MainWindow(QWidget):
         self.pb.setRange(0, 1000)
         self.pb.setValue(0)
         self.pb.setFixedHeight(8)
+        self.pb.setTextVisible(False)
         cv.addWidget(self.pb)
         self.lbl_stat = QLabel(" ")
         self.lbl_stat.setStyleSheet("color:#6b6d78; font-size:9.5pt;")
