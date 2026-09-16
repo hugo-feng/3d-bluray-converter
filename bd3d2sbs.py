@@ -49,8 +49,10 @@ CONTAINERS = [
     ("MP4（手机兼容性最好）", "mp4"),
 ]
 ENCODERS = [
-    ("AMD GPU 硬编 HEVC（快，推荐）", "gpu"),
-    ("CPU x265（慢，同码率画质略好）", "cpu"),
+    ("AMD AMF（A 卡 / 核显，推荐）", "amf"),
+    ("NVIDIA NVENC（N 卡，最快）", "nvenc"),
+    ("Intel QSV（I 卡 / 核显）", "qsv"),
+    ("CPU x265（最慢，画质略好）", "cpu"),
 ]
 SPEEDS = [
     ("质量优先", "quality"),
@@ -75,6 +77,69 @@ AUDIO_MODES = [
     ("无音轨", "none"),
 ]
 X265_PRESET = {"quality": "medium", "balanced": "fast", "speed": "veryfast"}
+NVENC_PRESET = {"quality": "p7", "balanced": "p5", "speed": "p3"}
+QSV_PRESET = {"quality": "slow", "balanced": "medium", "speed": "veryfast"}
+
+# 输出大小预估：3840×1080 基准码率（按 CQP 档），其他分辨率/帧率按比例缩放
+BASE_MBPS = {18: 28.0, 20: 21.0, 22: 15.0, 24: 10.0}
+LAYOUT_PIXELS = {"full_sbs": (3840, 1080), "half_sbs": (1920, 1080),
+                 "full_tab": (1920, 2160), "half_tab": (1920, 1080)}
+
+
+def estimate_output_size(dur, fps, layout, encoder, rc, qp, bitrate_mbps,
+                         audio_kbps, audio_mode):
+    """预估输出大小：返回 (总 MB, 视频 kbps, 音频 kbps)"""
+    w, h = LAYOUT_PIXELS.get(layout, (3840, 1080))
+    if rc == "cqp":
+        base = BASE_MBPS.get(int(qp), 28.0)
+        v_kbps = base * 1000.0 * (w * h) / (3840.0 * 1080.0) * (max(fps, 1.0) / 23.976)
+        if encoder == "cpu":
+            v_kbps *= 0.85
+    else:
+        v_kbps = bitrate_mbps * 1000.0
+    a_kbps = 0.0
+    if audio_mode != "none":
+        if audio_mode in ("dual", "copy"):
+            a_kbps += audio_kbps if audio_kbps > 0 else 1509.0
+        if audio_mode in ("dual", "aac_only"):
+            a_kbps += 320.0
+    total_mb = (v_kbps + a_kbps) * max(dur, 0.0) / 8.0 / 1024.0
+    return total_mb, v_kbps, a_kbps
+
+
+def probe_source_stats(path):
+    """读取源统计数据（单次 ffprobe）：(时长秒, 帧率, 音轨总码率 kbps)"""
+    try:
+        r = run_hidden([FFPROBE, "-v", "error", "-show_entries",
+                        "stream=codec_type,r_frame_rate,bit_rate:format=duration",
+                        "-of", "default=nw=1", path])
+        if r.returncode != 0:
+            return None
+        dur, fps, a_kbps = 0.0, 0.0, 0.0
+        cur = ""
+        for line in (r.stdout or "").splitlines():
+            line = line.strip()
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k == "codec_type":
+                cur = v
+            elif k == "duration":
+                dur = float(v)
+            elif k == "r_frame_rate":
+                if "/" in v:
+                    a, b = v.split("/")
+                    fps = float(a) / max(float(b), 1.0)
+                else:
+                    fps = float(v)
+            elif k == "bit_rate" and cur == "audio":
+                try:
+                    a_kbps += float(v) / 1000.0
+                except ValueError:
+                    pass
+        return (dur, fps, a_kbps)
+    except Exception:
+        return None
 
 DEMUX_WEIGHT = 3.0
 VIDEO_WEIGHT = 88.0
@@ -351,7 +416,7 @@ class ConvertJob(threading.Thread):
     """单个片段的完整转换任务（解流 -> 视频编码 -> 音频提取 -> 混流）"""
 
     def __init__(self, left_file, right_file, out_file, layout="full_sbs",
-                 container="mkv", encoder="gpu", rc="cqp", qp=18, bitrate=20,
+                 container="mkv", encoder="amf", rc="cqp", qp=18, bitrate=20,
                  speed="quality", gop=96, audio_mode="dual", audio_track=None,
                  open_after=False, max_frames=0, skip_demux=False,
                  on_log=None, on_progress=None, on_done=None, on_error=None):
@@ -361,7 +426,7 @@ class ConvertJob(threading.Thread):
         self.out_file = out_file
         self.layout = layout
         self.container = container
-        self.encoder = encoder
+        self.encoder = "amf" if encoder == "gpu" else encoder
         self.rc = rc
         self.qp = qp
         self.bitrate = bitrate
@@ -543,7 +608,7 @@ class ConvertJob(threading.Thread):
 
     def _video_args(self):
         args = []
-        if self.encoder == "gpu":
+        if self.encoder == "amf":
             args += ["-c:v", "hevc_amf", "-usage", "transcoding",
                      "-quality", self.speed]
             if self.rc == "cqp":
@@ -555,6 +620,25 @@ class ConvertJob(threading.Thread):
             else:
                 args += ["-rc", "cbr", "-b:v", "%dM" % self.bitrate,
                          "-maxrate", "%dM" % self.bitrate,
+                         "-bufsize", "%dM" % (self.bitrate * 2)]
+        elif self.encoder == "nvenc":
+            args += ["-c:v", "hevc_nvenc", "-preset",
+                     NVENC_PRESET.get(self.speed, "p5")]
+            if self.rc == "cqp":
+                args += ["-rc", "constqp", "-qp", str(self.qp)]
+            else:
+                rate = "vbr" if self.rc == "vbr" else "cbr"
+                args += ["-rc", rate, "-b:v", "%dM" % self.bitrate,
+                         "-maxrate", "%dM" % int(self.bitrate * (1.5 if self.rc == "vbr" else 1.0)),
+                         "-bufsize", "%dM" % (self.bitrate * 2)]
+        elif self.encoder == "qsv":
+            args += ["-c:v", "hevc_qsv", "-preset",
+                     QSV_PRESET.get(self.speed, "medium")]
+            if self.rc == "cqp":
+                args += ["-global_quality", str(self.qp)]
+            else:
+                args += ["-b:v", "%dM" % self.bitrate,
+                         "-maxrate", "%dM" % int(self.bitrate * (1.5 if self.rc == "vbr" else 1.0)),
                          "-bufsize", "%dM" % (self.bitrate * 2)]
         else:
             args += ["-c:v", "libx265", "-preset",
@@ -898,6 +982,8 @@ class Bridge(QObject):
     error = Signal(str)
     concat_progress = Signal(float, str)
     concat_done = Signal(str)
+    src_stats = Signal(object)
+    gpu_info = Signal(str)
 
 
 class SmoothScrollArea(QScrollArea):
@@ -1090,11 +1176,21 @@ class MainWindow(QWidget):
         self.bridge.error.connect(self._fail)
         self.bridge.concat_progress.connect(self._progress)
         self.bridge.concat_done.connect(self._concat_done)
+        self.bridge.src_stats.connect(self._apply_src_stats)
+        self.bridge.gpu_info.connect(self._apply_gpu_info)
 
         self.setWindowTitle(APP_TITLE)
         self.setObjectName("mainwin")
-        self.resize(900, 800)
         self.setMinimumSize(800, 640)
+        self._fit_screen()
+
+        self._src_dur = 0.0
+        self._src_fps = 0.0
+        self._src_a_kbps = 0.0
+        self._src_timer = QTimer(self)
+        self._src_timer.setSingleShot(True)
+        self._src_timer.setInterval(500)
+        self._src_timer.timeout.connect(self._src_probe_now)
         try:
             self.setWindowIcon(QIcon(ICON_PATH))
         except Exception:
@@ -1149,8 +1245,9 @@ class MainWindow(QWidget):
                        "BDMV\\STREAM 内的主视频流（如 00000.m2ts）")
         self._file_row(cv, "右眼文件", self.le_right, self.pick_right,
                        "同目录的另一条流（如 00001.m2ts，选左眼后自动配对）")
-        self._file_row(cv, "输出到", self.le_out, self.pick_out,
-                       "建议输出磁盘剩余空间 ≥ 45 GB")
+        self.lbl_out_size = self._file_row(cv, "输出到", self.le_out, self.pick_out,
+                                           "建议输出磁盘剩余空间 ≥ 45 GB")
+        self.lbl_out_size.setWordWrap(True)
         root.addWidget(card)
 
         # ---------- 输出格式 ----------
@@ -1250,9 +1347,9 @@ class MainWindow(QWidget):
         self._file_row(self.sec_cat.body_layout, "保存全片", self.le_cat_out,
                        self.pick_cat_out, "先选好保存位置，再点右侧「开始拼接」")
         r = QHBoxLayout()
-        tip = QLabel("不重编码，直接封装 · 音轨、字幕、章节全部保留")
-        tip.setObjectName("faintlabel")
-        r.addWidget(tip, 1)
+        self.lbl_cat_size = QLabel("不重编码，直接封装 · 音轨、字幕、章节全部保留")
+        self.lbl_cat_size.setObjectName("faintlabel")
+        r.addWidget(self.lbl_cat_size, 1)
         self.btn_concat_run = QPushButton("开始拼接")
         self.btn_concat_run.clicked.connect(self.concat_start)
         r.addWidget(self.btn_concat_run)
@@ -1328,13 +1425,35 @@ class MainWindow(QWidget):
         self.le_seg1.textChanged.connect(lambda _=None: self._refresh_summaries())
         self.le_seg2.textChanged.connect(lambda _=None: self._refresh_summaries())
         self.le_cat_out.textChanged.connect(lambda _=None: self._refresh_summaries())
+        self.le_bitrate.textChanged.connect(lambda _=None: self._refresh_summaries())
+        self.le_left.textChanged.connect(self._schedule_src_probe)
+        self.le_right.textChanged.connect(self._schedule_src_probe)
         self.chk_open.stateChanged.connect(lambda _=None: self._refresh_summaries())
 
         self._on_rc_change(self.cmb_rc.currentText())
         self._refresh_summaries()
         self._log("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
+        self._src_timer.start()
+        QTimer.singleShot(300, self._detect_gpu_async)
 
     # ---------- UI 工具 ----------
+    def _fit_screen(self):
+        """启动尺寸：宽高比与显示器一致，高度约占屏幕 78%"""
+        try:
+            scr = QApplication.primaryScreen()
+            g = scr.availableGeometry() if scr else None
+            if g is None or g.height() <= 0 or g.width() <= 0:
+                self.resize(900, 800)
+                return
+            h = int(g.height() * 0.78)
+            w = int(h * g.width() / g.height())
+            if w > int(g.width() * 0.96):
+                w = int(g.width() * 0.96)
+                h = int(w * g.height() / g.width())
+            self.resize(max(w, 800), max(h, 640))
+        except Exception:
+            self.resize(900, 800)
+
     @staticmethod
     def _set_combo(cb, value):
         i = cb.findText(value)
@@ -1356,6 +1475,7 @@ class MainWindow(QWidget):
         h.setObjectName("faintlabel")
         h.setContentsMargins(70, 0, 0, 4)
         parent.addWidget(h)
+        return h
 
     def _sel(self, presets, value, default):
         for name, val in presets:
@@ -1403,7 +1523,9 @@ class MainWindow(QWidget):
         self.sec_fmt.set_summary("%s · %s" % (
             self.cmb_layout.currentText().split("  ")[0],
             self.cmb_container.currentText().split("（")[0]))
-        enc = "GPU" if self.cmb_encoder.currentText() == ENCODERS[0][0] else "CPU"
+        enc_name = {"amf": "AMD AMF", "nvenc": "NVENC", "qsv": "QSV", "cpu": "CPU"}
+        enc = enc_name.get(
+            self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf"), "AMD AMF")
         self.sec_enc.set_summary("%s · %s · %s" % (
             enc, self.cmb_qp.currentText().split("（")[0],
             self.cmb_speed.currentText()))
@@ -1417,6 +1539,95 @@ class MainWindow(QWidget):
             self.sec_cat.set_summary("两段已就绪，请选保存位置")
         else:
             self.sec_cat.set_summary("已选 1 段，还差 1 段" if n == 1 else "未选择分段")
+        self._update_size_estimate()
+        self._update_cat_estimate()
+
+    # ---------- 预估 ----------
+    def _schedule_src_probe(self, *_):
+        self._src_dur = 0.0
+        self._src_fps = 0.0
+        self._src_a_kbps = 0.0
+        self._src_timer.start()
+
+    def _src_probe_now(self):
+        p = self.le_left.text().strip() or self.le_right.text().strip()
+        if not p or not os.path.exists(p):
+            self._update_size_estimate()
+            return
+        threading.Thread(
+            target=lambda: self.bridge.src_stats.emit(probe_source_stats(p)),
+            daemon=True).start()
+
+    def _apply_src_stats(self, stats):
+        if stats:
+            self._src_dur, self._src_fps, self._src_a_kbps = stats
+        else:
+            self._src_dur = self._src_fps = self._src_a_kbps = 0.0
+        self._update_size_estimate()
+
+    def _update_size_estimate(self):
+        if self._src_dur <= 0:
+            self.lbl_out_size.setText(
+                "预计输出大小：选择左右眼文件后自动估算（随布局 / 编码器 / 质量档变化）")
+            return
+        layout = self._sel(LAYOUTS, self.cmb_layout.currentText(), "full_sbs")
+        encoder = self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf")
+        rc = self._sel(RC_MODES, self.cmb_rc.currentText(), "cqp")
+        qp = self._sel(QP_LEVELS, self.cmb_qp.currentText(), 18)
+        try:
+            bitrate = max(1, int(self.le_bitrate.text()))
+        except ValueError:
+            bitrate = 20
+        audio_mode = self._sel(AUDIO_MODES, self.cmb_audio.currentText(), "dual")
+        mb, v_kbps, a_kbps = estimate_output_size(
+            self._src_dur, self._src_fps or 23.976, layout, encoder, rc, qp,
+            bitrate, self._src_a_kbps, audio_mode)
+        if mb >= 1024:
+            size_txt = "约 %.1f GB" % (mb / 1024.0)
+        else:
+            size_txt = "约 %.0f MB" % mb
+        self.lbl_out_size.setText(
+            "预计输出大小：%s（视频约 %.1f Mbps + 音频约 %.1f Mbps；"
+            "实际随画面复杂度浮动）" % (size_txt, v_kbps / 1000.0, a_kbps / 1000.0))
+
+    def _update_cat_estimate(self):
+        total = 0
+        for p in (self.le_seg1.text().strip(), self.le_seg2.text().strip()):
+            try:
+                if p and os.path.exists(p):
+                    total += os.path.getsize(p)
+            except OSError:
+                pass
+        if total > 0:
+            if total >= 1024 ** 3:
+                txt = "约 %.1f GB" % (total / 1024.0 ** 3)
+            else:
+                txt = "约 %.0f MB" % (total / 1024.0 ** 2)
+            self.lbl_cat_size.setText(
+                "预计全片大小：%s（两段之和，无损直封装）" % txt)
+        else:
+            self.lbl_cat_size.setText("不重编码，直接封装 · 音轨、字幕、章节全部保留")
+
+    # ---------- 硬件检测 ----------
+    def _detect_gpu_async(self):
+        def work():
+            names = ""
+            try:
+                r = run_hidden(["powershell", "-NoProfile", "-Command",
+                                "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+                                "(Get-CimInstance Win32_VideoController).Name -join ' / '"])
+                names = (r.stdout or "").strip()
+            except Exception:
+                pass
+            if names:
+                self.bridge.gpu_info.emit(names)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_gpu_info(self, names):
+        self._log("检测到显卡：%s" % names)
+        self.cmb_encoder.setToolTip(
+            "检测到的显卡：\n%s\n\n提示：选择未安装对应硬件的硬件编码器会转换失败，"
+            "此时请改用其他编码器。" % names)
 
     # ---------- 配置 ----------
     def _load_cfg(self):
@@ -1630,7 +1841,7 @@ class MainWindow(QWidget):
             left, right, out,
             layout=self._sel(LAYOUTS, self.cmb_layout.currentText(), "full_sbs"),
             container=container,
-            encoder=self._sel(ENCODERS, self.cmb_encoder.currentText(), "gpu"),
+            encoder=self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf"),
             rc=self._sel(RC_MODES, self.cmb_rc.currentText(), "cqp"),
             qp=qp, bitrate=bitrate,
             speed=self._sel(SPEEDS, self.cmb_speed.currentText(), "quality"),
@@ -1783,14 +1994,14 @@ def main():
         if not left or not right or not out:
             print("用法: python bd3d2sbs.py --cli --left 00000.m2ts --right 00001.m2ts "
                   "--out x.mkv [--layout full_sbs|half_sbs|full_tab|half_tab] "
-                  "[--container mkv|mp4] [--encoder gpu|cpu] [--quality 0-3] "
+                  "[--container mkv|mp4] [--encoder amf|nvenc|qsv|cpu] [--quality 0-3] "
                   "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux]")
             return 1
         job = ConvertJob(
             left, right, out,
             layout=get("--layout", "full_sbs"),
             container=get("--container", "mkv"),
-            encoder=get("--encoder", "gpu"),
+            encoder=get("--encoder", "amf"),
             bitrate=int(get("--bitrate", "20") or 20),
             qp=qp,
             audio_mode=("none" if noaudio else "dual"),
