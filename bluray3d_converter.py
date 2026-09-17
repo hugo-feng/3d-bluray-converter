@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.0.1"
+APP_VERSION = "v2.1.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -1503,18 +1503,28 @@ class MainWindow(QWidget):
         self.sec_adv.body_layout.addLayout(r)
         root.addWidget(self.sec_adv)
 
-        # ---------- 无损拼接（两段合成全片） ----------
-        self.sec_cat = Section("无损拼接（两段合成全片）")
-        self.le_seg1 = QLineEdit(self.cfg.get("seg1", ""))
-        self.le_seg2 = QLineEdit(self.cfg.get("seg2", ""))
+        # ---------- 无损拼接（多段合成全片） ----------
+        self.sec_cat = Section("无损拼接（多段合成全片）")
+        self.seg_rows = []
+        self.seg_list_layout = QVBoxLayout()
+        self.seg_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.seg_list_layout.setSpacing(6)
+        self.sec_cat.body_layout.addLayout(self.seg_list_layout)
+        saved_segs = self.cfg.get("segs")
+        if not isinstance(saved_segs, list) or len(saved_segs) < 2:
+            saved_segs = [self.cfg.get("seg1", ""), self.cfg.get("seg2", "")]
+        for p in saved_segs[:16]:
+            self._add_seg_row(str(p))
+        while len(self.seg_rows) < 2:
+            self._add_seg_row("")
         self.le_cat_out = QLineEdit(self.cfg.get("cat_out", ""))
-        self._file_row(self.sec_cat.body_layout, "第一段", self.le_seg1,
-                       self.pick_seg1, "已转换好的前半段（如 d1 的 SBS 输出）")
-        self._file_row(self.sec_cat.body_layout, "第二段", self.le_seg2,
-                       self.pick_seg2, "已转换好的后半段（如 d2 的 SBS 输出）")
         self._file_row(self.sec_cat.body_layout, "保存全片", self.le_cat_out,
                        self.pick_cat_out, "先选好保存位置，再点右侧「开始拼接」")
         r = QHBoxLayout()
+        self.btn_seg_add = QPushButton("添加分段")
+        self.btn_seg_add.setFixedWidth(90)
+        self.btn_seg_add.clicked.connect(self._on_add_seg)
+        r.addWidget(self.btn_seg_add)
         self.lbl_cat_size = QLabel("不重编码，直接封装 · 音轨、字幕、章节全部保留")
         self.lbl_cat_size.setObjectName("faintlabel")
         r.addWidget(self.lbl_cat_size, 1)
@@ -1590,8 +1600,6 @@ class MainWindow(QWidget):
             cb.currentTextChanged.connect(lambda _=None: self._refresh_summaries())
         self.cmb_rc.currentTextChanged.connect(self._on_rc_change)
         self.le_gop.textChanged.connect(lambda _=None: self._refresh_summaries())
-        self.le_seg1.textChanged.connect(lambda _=None: self._refresh_summaries())
-        self.le_seg2.textChanged.connect(lambda _=None: self._refresh_summaries())
         self.le_cat_out.textChanged.connect(lambda _=None: self._refresh_summaries())
         self.le_bitrate.textChanged.connect(lambda _=None: self._refresh_summaries())
         self.le_left.textChanged.connect(self._schedule_src_probe)
@@ -1672,6 +1680,11 @@ class MainWindow(QWidget):
             self.btn_theme.setIconSize(pm.size())
         for sec in (self.sec_fmt, self.sec_enc, self.sec_aud, self.sec_adv, self.sec_cat):
             sec.set_theme(self._theme)
+        for item in getattr(self, "seg_rows", []):
+            pm = icon_pixmap("x.svg" if self._theme == "dark" else "x-light.svg", 14)
+            if pm is not None:
+                item["rm"].setIcon(QIcon(pm))
+                item["rm"].setIconSize(pm.size())
         self._apply_titlebar()
 
     def _apply_titlebar(self):
@@ -1701,13 +1714,15 @@ class MainWindow(QWidget):
         self.sec_adv.set_summary("GOP %s%s · FFmpeg %s" % (
             self.le_gop.text(), " · 完成后打开" if self.chk_open.isChecked() else "",
             self.cmb_ffver.currentText().split("（")[0]))
-        n = sum(1 for le in (self.le_seg1, self.le_seg2) if le.text().strip())
-        if n == 2 and self.le_cat_out.text().strip():
-            self.sec_cat.set_summary("就绪 · 可开始拼接")
-        elif n == 2:
-            self.sec_cat.set_summary("两段已就绪，请选保存位置")
+        n = sum(1 for p in self._seg_paths() if p)
+        if n >= 2 and self.le_cat_out.text().strip():
+            self.sec_cat.set_summary("%d 段已就绪 · 可开始拼接" % n)
+        elif n >= 2:
+            self.sec_cat.set_summary("%d 段已就绪，请选保存位置" % n)
+        elif n == 1:
+            self.sec_cat.set_summary("已选 1 段，还差 1 段")
         else:
-            self.sec_cat.set_summary("已选 1 段，还差 1 段" if n == 1 else "未选择分段")
+            self.sec_cat.set_summary("未选择分段")
         self._update_size_estimate()
         self._update_cat_estimate()
 
@@ -1761,10 +1776,12 @@ class MainWindow(QWidget):
 
     def _update_cat_estimate(self):
         total = 0
-        for p in (self.le_seg1.text().strip(), self.le_seg2.text().strip()):
+        n = 0
+        for p in self._seg_paths():
             try:
                 if p and os.path.exists(p):
                     total += os.path.getsize(p)
+                    n += 1
             except OSError:
                 pass
         if total > 0:
@@ -1773,7 +1790,7 @@ class MainWindow(QWidget):
             else:
                 txt = "约 %.0f MB" % (total / 1024.0 ** 2)
             self.lbl_cat_size.setText(
-                "预计全片大小：%s（两段之和，无损直封装）" % txt)
+                "预计全片大小：%s（%d 段之和，无损直封装）" % (txt, n))
         else:
             self.lbl_cat_size.setText("不重编码，直接封装 · 音轨、字幕、章节全部保留")
 
@@ -1845,7 +1862,7 @@ class MainWindow(QWidget):
                "audio": self.cmb_audio.currentText(),
                "gop": self.le_gop.text(),
                "ffver": self.cmb_ffver.currentText(),
-               "seg1": self.le_seg1.text(), "seg2": self.le_seg2.text(),
+               "segs": self._seg_paths(),
                "cat_out": self.le_cat_out.text(),
                "encoder_touched": bool(self._encoder_touched or self._enc_user_fixed),
                "open_after": self.chk_open.isChecked()}
@@ -2169,30 +2186,84 @@ class MainWindow(QWidget):
             self.lbl_stage.setText("正在取消")
             self.job.cancel()
 
-    # ---------- 无损拼接 ----------
-    def pick_seg1(self):
+    # ---------- 无损拼接（多段） ----------
+    def _add_seg_row(self, path=""):
+        if len(self.seg_rows) >= 16:
+            return
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        lb = QLabel("")
+        lb.setFixedWidth(64)
+        h.addWidget(lb)
+        le = QLineEdit(path)
+        le.setPlaceholderText("按顺序选择要拼接的视频（mkv / mp4 / ts / m2ts）")
+        le.textChanged.connect(lambda _=None: self._refresh_summaries())
+        h.addWidget(le, 1)
+        b = QPushButton("浏览")
+        b.setFixedWidth(64)
+        b.clicked.connect(lambda _=None, e=le: self._pick_seg(e))
+        h.addWidget(b)
+        rm = QPushButton()
+        rm.setObjectName("themebtn")
+        rm.setFixedSize(30, 30)
+        rm.setToolTip("移除此段")
+        rm.clicked.connect(lambda _=None, r=row: self._remove_seg_row(r))
+        h.addWidget(rm)
+        self.seg_list_layout.addWidget(row)
+        self.seg_rows.append({"row": row, "label": lb, "edit": le, "rm": rm})
+        pm = icon_pixmap("x.svg" if self._theme == "dark" else "x-light.svg", 14)
+        if pm is not None:
+            rm.setIcon(QIcon(pm))
+            rm.setIconSize(pm.size())
+        self._relabel_segs()
+
+    def _remove_seg_row(self, row):
+        if len(self.seg_rows) <= 2:
+            return
+        for item in list(self.seg_rows):
+            if item["row"] is row:
+                self.seg_rows.remove(item)
+                row.setParent(None)
+                row.deleteLater()
+                break
+        self._relabel_segs()
+
+    def _relabel_segs(self):
+        for i, item in enumerate(self.seg_rows, 1):
+            item["label"].setText("第 %d 段" % i)
+            item["rm"].setEnabled(len(self.seg_rows) > 2)
+        if hasattr(self, "btn_seg_add"):
+            self.btn_seg_add.setEnabled(len(self.seg_rows) < 16)
+        if hasattr(self, "lbl_cat_size"):
+            self._refresh_summaries()
+
+    def _on_add_seg(self):
+        if len(self.seg_rows) >= 16:
+            return
+        self._add_seg_row("")
+
+    def _seg_paths(self):
+        return [r["edit"].text().strip() for r in self.seg_rows]
+
+    def _pick_seg(self, edit):
         p, _ = QFileDialog.getOpenFileName(
-            self, "选择第一段（前半段）", self.le_seg1.text() or "",
+            self, "选择要拼接的视频段", edit.text() or "",
             "视频文件 (*.mkv *.mp4 *.ts *.m2ts);;所有文件 (*)")
         if p:
-            self.le_seg1.setText(p)
+            edit.setText(p)
             if not self.le_cat_out.text().strip():
                 base = os.path.splitext(os.path.basename(p))[0]
                 self.le_cat_out.setText(
                     os.path.join(os.path.dirname(p), base + "_完整片.mkv"))
 
-    def pick_seg2(self):
-        start = os.path.dirname(self.le_seg2.text() or self.le_seg1.text()) or ""
-        p, _ = QFileDialog.getOpenFileName(
-            self, "选择第二段（后半段）", start,
-            "视频文件 (*.mkv *.mp4 *.ts *.m2ts);;所有文件 (*)")
-        if p:
-            self.le_seg2.setText(p)
-
     def pick_cat_out(self):
-        base = os.path.splitext(os.path.basename(self.le_seg1.text()))[0] or "完整片"
+        paths = [p for p in self._seg_paths() if p]
+        first = paths[0] if paths else ""
+        base = os.path.splitext(os.path.basename(first))[0] or "完整片"
         default = self.le_cat_out.text().strip() or os.path.join(
-            os.path.dirname(self.le_seg1.text()), base + "_完整片.mkv")
+            os.path.dirname(first), base + "_完整片.mkv")
         p, _ = QFileDialog.getSaveFileName(
             self, "选择完整片的保存位置", default, "Matroska 视频 (*.mkv)")
         if p:
@@ -2206,24 +2277,30 @@ class MainWindow(QWidget):
         if self.job and self.job.is_alive():
             QMessageBox.information(self, APP_TITLE, "转换任务进行中，请等待完成后再拼接")
             return
-        seg1 = self.le_seg1.text().strip()
-        seg2 = self.le_seg2.text().strip()
-        if not seg1 or not seg2:
-            QMessageBox.critical(self, APP_TITLE, "请先分别选择第一段和第二段视频")
+        segs = [p for p in self._seg_paths() if p]
+        if len(segs) < 2:
+            QMessageBox.critical(self, APP_TITLE, "请至少按顺序选择 2 段视频")
             return
-        for p in (seg1, seg2):
+        if len(segs) > 16:
+            QMessageBox.critical(self, APP_TITLE, "最多支持 16 段视频")
+            return
+        for p in segs:
             if not os.path.exists(p):
                 QMessageBox.critical(self, APP_TITLE, "找不到文件：\n" + p)
                 return
-        if os.path.normcase(os.path.abspath(seg1)) == os.path.normcase(os.path.abspath(seg2)):
-            QMessageBox.critical(self, APP_TITLE, "第一段与第二段不能是同一个文件")
-            return
+        seen = set()
+        for p in segs:
+            k = os.path.normcase(os.path.abspath(p))
+            if k in seen:
+                QMessageBox.critical(self, APP_TITLE, "分段列表存在重复文件：\n" + p)
+                return
+            seen.add(k)
         out = self.le_cat_out.text().strip()
         if not out:
-            base = os.path.splitext(os.path.basename(seg1))[0]
+            base = os.path.splitext(os.path.basename(segs[0]))[0]
             out, _ = QFileDialog.getSaveFileName(
                 self, "选择完整片的保存位置",
-                os.path.join(os.path.dirname(seg1), base + "_完整片.mkv"),
+                os.path.join(os.path.dirname(segs[0]), base + "_完整片.mkv"),
                 "Matroska 视频 (*.mkv)")
             if not out:
                 return
@@ -2236,11 +2313,11 @@ class MainWindow(QWidget):
         self.btn_concat_run.setText("拼接中...")
         self.btn_cancel.setEnabled(True)
         self.lbl_stage.setText("拼接中")
-        self._log("========== 无损拼接 ==========")
-        self._log("第一段：%s" % seg1)
-        self._log("第二段：%s" % seg2)
+        self._log("========== 无损拼接（%d 段） ==========" % len(segs))
+        for i, p in enumerate(segs, 1):
+            self._log("第 %d 段：%s" % (i, p))
         self._log("保存全片：%s" % out)
-        concat_files([seg1, seg2], out,
+        concat_files(segs, out,
                      on_log=lambda s: self.bridge.log.emit(s),
                      on_progress=lambda pct, info: self.bridge.concat_progress.emit(pct, info),
                      on_done=lambda o: self.bridge.concat_done.emit(o),

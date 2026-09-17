@@ -9,7 +9,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.0.1/3DBlurayConverter_v2.0.1_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.1.0/3DBlurayConverter_v2.1.0_portable.zip
 
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 
@@ -19,7 +19,7 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.0.1/3DBlur
 |---|---|
 | ![浅色主题](docs/screenshot-light.png) | ![设置项](docs/screenshot-settings.png) |
 
-![无损拼接（双碟合成完整片）](docs/screenshot-concat.png)
+![无损拼接（多段合成完整片）](docs/screenshot-concat.png)
 
 ## 功能
 
@@ -35,8 +35,8 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.0.1/3DBlur
 - **音轨**：自动探测原盘全部音轨，可指定主音轨；输出模式支持
   原声 + AAC 兼容轨（推荐，手机也能放）/ 仅原声无损直通 / 仅 AAC / 无音轨
 - **容器**：MKV（支持 DTS 原声）/ MP4（手机兼容性最好，自动处理音轨转码）
-- **无损拼接**：两段（如双碟）分别导入 + 选择保存位置 → 一键合成完整片；
-  mkvmerge 直封装不重编码，音轨 / 字幕 / 章节全部保留；
+- **无损拼接**：多段（至高 16 段）按顺序导入 + 选择保存位置 → 一键合成完整片；
+  支持添加 / 移除任意分段；mkvmerge 直封装不重编码，音轨 / 字幕 / 章节全部保留；
   先写临时文件成功后原子替换，中途失败不会破坏已有文件
 - **大小预估**：选择左右眼后实时预估成品大小；拼接时实时显示全片预计大小
 - **进度与倒计时**：解流 / 编码 / 音频 / 混流各阶段实时进度、帧率与剩余时间
@@ -62,8 +62,9 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.0.1/3DBlur
 4. 按需展开「输出格式 / 编码设置 / 音频 / 高级」调整参数（收起时右侧显示当前配置摘要）
 5. 点击「开始转换」——开始前先做**编码器可用性预检**（约 1 秒），
    进度区实时显示 解流中 / 编码中 / 音频提取 / 混流封装 与预计剩余时间
-6. 若影片分两张碟：分别在「无损拼接」区选择**第一段、第二段、保存位置**，
-   点「开始拼接」合成完整片（按钮左侧显示预计全片大小）
+6. 若影片分多张碟（或分成多个文件）：在「无损拼接」区按顺序添加各段
+   （至高 16 段，可随时添加 / 移除），选择保存位置后点「开始拼接」
+   （按钮左侧显示预计全片大小）
 
 **关于中文路径**：软件所在的目录必须全英文（否则内置解码器无法加载）。
 如果输出路径含中文字符，软件会自动把中间文件放到同盘根目录（日志中有提示）；
