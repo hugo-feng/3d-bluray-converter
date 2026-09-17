@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.5.0"
+APP_VERSION = "v2.6.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -56,6 +56,13 @@ ENCODERS = [
     ("Intel QSV（I 卡 / 核显）", "qsv"),
     ("CPU x265（最慢，画质略好）", "cpu"),
 ]
+ENCODER_TIP_BASE = (
+    "编码器：\n"
+    "  · AMD AMF：AMD 显卡 / 核显硬件加速\n"
+    "  · NVIDIA NVENC：NVIDIA 显卡，速度最快\n"
+    "  · Intel QSV：Intel 核显 / Arc\n"
+    "  · CPU x265：无硬件要求，速度最慢、画质略好\n"
+    "选择本机未安装对应硬件的编码器会转换失败；启动时会自动检测显卡并推荐。")
 SPEEDS = [
     ("质量优先", "quality"),
     ("平衡", "balanced"),
@@ -433,8 +440,8 @@ QLabel { background: transparent; }
 #sectiondesc { color: @FAINT@; }
 #dimlabel { color: @DIM@; }
 #faintlabel { color: @FAINT@; font-size: 9.5pt; }
-#themebtn { background: transparent; border: none; border-radius: 6px; padding: 4px; }
-#themebtn:hover { background: @HOVER@; }
+#themebtn { background: transparent; border: 1px solid @BORDER@; border-radius: 6px; padding: 4px; }
+#themebtn:hover { background: @HOVER@; border-color: @DIM@; }
 QLineEdit { background: @INPUT@; border: 1px solid @INPUT_BORDER@; border-radius: 6px;
             padding: 5px 8px; color: @TEXT@; }
 QLineEdit:focus { border: 1px solid @ACCENT@; }
@@ -520,15 +527,31 @@ def make_msgbox(parent, icon, text, buttons, default_button=None):
     if default_button is not None:
         mb.setDefaultButton(default_button)
     c = THEMES.get(_ACTIVE.get("theme", "dark"), THEMES["dark"])
+    for role, name in ((QMessageBox.Yes, "mbYes"), (QMessageBox.No, "mbNo"),
+                       (QMessageBox.Ok, "mbOk"), (QMessageBox.Cancel, "mbCancel")):
+        b = mb.button(role)
+        if b is not None:
+            b.setObjectName(name)
     mb.setStyleSheet(
         "QMessageBox { background: %(card)s; }"
         "QMessageBox QLabel { color: %(text)s; background: transparent; }"
         "QMessageBox QPushButton { background: %(btn)s; color: %(text)s;"
         " border: 1px solid %(border)s; border-radius: 6px; min-width: 72px;"
-        " padding: 6px 14px; }"
+        " padding: 6px 14px; font-weight: 700; }"
         "QMessageBox QPushButton:hover { background: %(btnh)s; }"
+        "QMessageBox QPushButton#mbYes { background: %(accent)s; color: #ffffff;"
+        " border: 1px solid %(accent)s; }"
+        "QMessageBox QPushButton#mbYes:hover { background: %(accent_h)s; }"
+        "QMessageBox QPushButton#mbNo { background: %(danger)s; color: #ffffff;"
+        " border: 1px solid %(danger)s; }"
+        "QMessageBox QPushButton#mbNo:hover { background: %(danger_h)s; }"
+        "QMessageBox QPushButton#mbOk { background: %(accent)s; color: #ffffff;"
+        " border: 1px solid %(accent)s; }"
+        "QMessageBox QPushButton#mbOk:hover { background: %(accent_h)s; }"
         % {"card": c["card"], "text": c["text"], "btn": c["btn"],
-           "border": c["border"], "btnh": c["btn_h"]})
+           "border": c["border"], "btnh": c["btn_h"],
+           "accent": c["accent"], "accent_h": c["accent_h"],
+           "danger": c["danger"], "danger_h": c["danger_h"]})
     mb.setAutoFillBackground(True)
     pal = mb.palette()
     pal.setColor(QPalette.Window, QColor(c["card"]))
@@ -859,7 +882,7 @@ class ConvertJob(threading.Thread):
             self.stats["total"] = time.time() - t_all
             self._log("完成：" + self.out_file)
             self._cleanup_workdir()
-            self.on_progress("done", 100.0, "全部完成")
+            self.on_progress("done", 100.0, "全部完成", -1.0)
             if self.open_after:
                 try:
                     os.startfile(os.path.dirname(os.path.abspath(self.out_file)))
@@ -953,7 +976,7 @@ class ConvertJob(threading.Thread):
                 del tail[0]
             if "flushing" in line.lower() or "write buffer" in line.lower():
                 self.on_progress("demux", DEMUX_WEIGHT * cur_pct / 100.0,
-                                 "正在写入磁盘缓存（数据量较大，请稍候）...")
+                                 "正在写入磁盘缓存（数据量较大，请稍候）...", -1.0)
             m = re.search(r"([\d.]+)% complete", line)
             if m:
                 pct = float(m.group(1))
@@ -964,8 +987,10 @@ class ConvertJob(threading.Thread):
                     info = "解流中 %.0f%% · 本阶段剩余约 %s" % (
                         pct, fmt_time(remain))
                 else:
+                    remain = -1.0
                     info = "解流中 %.0f%%" % pct
-                self.on_progress("demux", DEMUX_WEIGHT * pct / 100.0, info)
+                self.on_progress("demux", DEMUX_WEIGHT * pct / 100.0, info,
+                                 remain)
                 if int(pct) % 5 == 0 and int(pct) != last_chk:
                     last_chk = int(pct)
                     try:
@@ -1080,7 +1105,7 @@ class ConvertJob(threading.Thread):
             self._log("  提示：若修改过布局 / 编码器 / 质量等画面参数，"
                       "请取消勾选「复用已完成的编码」后重新开始")
             self.on_progress("encode", DEMUX_WEIGHT + VIDEO_WEIGHT,
-                             "复用已完成的编码结果")
+                             "复用已完成的编码结果", -1.0)
             self.stats["encode"] = 0.0
             self.stats["reused"] = True
         else:
@@ -1137,7 +1162,7 @@ class ConvertJob(threading.Thread):
                     pct = DEMUX_WEIGHT + (cur / max(total, 1)) * VIDEO_WEIGHT
                     info = "%d/%d 帧 · %.0f fps · 本阶段剩余约 %s" % (
                         cur, total, speed, fmt_time(remain))
-                    self.on_progress("encode", pct, info)
+                    self.on_progress("encode", pct, info, remain)
                 elif line.startswith("progress=") and line.endswith("end"):
                     break
                 elif "=" not in line:
@@ -1197,7 +1222,7 @@ class ConvertJob(threading.Thread):
                         "audio", pct,
                         "音频提取 %d/%d · %.0f%% · 本阶段剩余约 %s" % (
                             ai + 1, len(extract_jobs), frac * 100,
-                            fmt_time(remain)))
+                            fmt_time(remain)), remain)
                 elif line.startswith("progress=") and line.endswith("end"):
                     break
                 elif "=" not in line and line:
@@ -1250,7 +1275,7 @@ class ConvertJob(threading.Thread):
                 pct = base_pct + frac * MUX_WEIGHT
                 self.on_progress(
                     "mux", pct, "混流封装中 %.0f%% · 本阶段剩余约 %s" % (
-                        frac * 100, fmt_time(remain)))
+                        frac * 100, fmt_time(remain)), remain)
             elif line.startswith("progress=") and line.endswith("end"):
                 break
             elif "=" not in line and line:
@@ -1452,7 +1477,7 @@ def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
 class Bridge(QObject):
     """线程 -> UI 的信号桥"""
     log = Signal(str)
-    progress = Signal(str, float, str)
+    progress = Signal(str, float, str, float)
     done = Signal(str, object)
     error = Signal(str)
     concat_progress = Signal(float, str)
@@ -1806,6 +1831,7 @@ class MainWindow(QWidget):
         self.cmb_encoder = NoWheelComboBox()
         self.cmb_encoder.addItems([x[0] for x in ENCODERS])
         self._set_combo(self.cmb_encoder, self.cfg.get("encoder", ENCODERS[0][0]))
+        self.cmb_encoder.setToolTip(ENCODER_TIP_BASE)
         self.cmb_encoder.activated.connect(
             lambda _=None: setattr(self, "_encoder_touched", True))
         r.addWidget(self.cmb_encoder, 2)
@@ -1813,6 +1839,11 @@ class MainWindow(QWidget):
         self.cmb_speed = NoWheelComboBox()
         self.cmb_speed.addItems([x[0] for x in SPEEDS])
         self._set_combo(self.cmb_speed, self.cfg.get("speed", SPEEDS[0][0]))
+        self.cmb_speed.setToolTip(
+            "编码速度（硬件预设）：\n"
+            "  · 质量优先：编码最慢，同画质下体积最小（画质最佳）\n"
+            "  · 平衡：速度与体积折中\n"
+            "  · 速度优先：编码最快，体积略大")
         r.addWidget(self.cmb_speed, 1)
         r.addStretch(1)
         self.sec_enc.body_layout.addLayout(r)
@@ -1821,11 +1852,24 @@ class MainWindow(QWidget):
         self.cmb_rc = NoWheelComboBox()
         self.cmb_rc.addItems([x[0] for x in RC_MODES])
         self._set_combo(self.cmb_rc, self.cfg.get("rc", RC_MODES[0][0]))
+        self.cmb_rc.setToolTip(
+            "质量模式：\n"
+            "  · 恒定质量（CQP/CRF）：按画质档位编码，体积随画面复杂度浮动，\n"
+            "    同画质下体积通常最小（推荐）\n"
+            "  · 目标平均码率（VBR）：按目标码率编码，体积可控、画质浮动\n"
+            "  · 固定码率（CBR）：码率恒定，体积固定、兼容性最好\n"
+            "  切换后，下方「质量」或「码率」输入框会自动启用其一")
         r.addWidget(self.cmb_rc, 1)
         r.addWidget(QLabel("质量"))
         self.cmb_qp = NoWheelComboBox()
         self.cmb_qp.addItems([x[0] for x in QP_LEVELS])
         self._set_combo(self.cmb_qp, self.cfg.get("qp", QP_LEVELS[0][0]))
+        self.cmb_qp.setToolTip(
+            "质量档位（仅「恒定质量」模式有效；CQP 数值越小画质越高、体积越大）：\n"
+            "  · 高画质 CQP 18：约 28 Mbps（收藏级，体积最大）\n"
+            "  · 标准 CQP 20：约 21 Mbps（推荐）\n"
+            "  · 压缩 CQP 22：约 15 Mbps\n"
+            "  · 高压缩 CQP 24：约 10 Mbps（体积最小）")
         r.addWidget(self.cmb_qp, 2)
         r.addWidget(QLabel("码率(M)"))
         self.le_bitrate = QLineEdit(str(self.cfg.get("bitrate", 20)))
@@ -2053,6 +2097,7 @@ class MainWindow(QWidget):
         b = QPushButton("浏览")
         b.setFixedWidth(64)
         b.clicked.connect(browse_cmd)
+        le._browse_btn = b
         row.addWidget(b)
         if right_pad:
             spacer = QWidget()
@@ -2371,14 +2416,13 @@ class MainWindow(QWidget):
                 self._refresh_summaries()
         if target == "nvenc" and drv is not None:
             self._log("FFmpeg 版本：自动模式将使用 %s" % pick_ffmpeg_by_driver(drv))
-        tip = ""
+        extra = []
         if names:
-            tip = "检测到的显卡：\n%s\n" % names
+            extra.append("检测到的显卡：\n%s" % names)
         if drv_raw:
-            tip += "NVIDIA 驱动：%s\n" % drv_raw
-        tip += ("\n提示：选择未安装对应硬件的硬件编码器会转换失败；"
-                "N 卡驱动过旧时可在「高级 → FFmpeg 版本」切换兼容版 8.0。")
-        self.cmb_encoder.setToolTip(tip)
+            extra.append("NVIDIA 驱动：%s" % drv_raw)
+        extra.append("提示：N 卡驱动过旧时可在「高级 → FFmpeg 版本」切换兼容版 8.0。")
+        self.cmb_encoder.setToolTip(ENCODER_TIP_BASE + "\n\n" + "\n".join(extra))
 
     # ---------- 配置 ----------
     def _load_cfg(self):
@@ -2572,28 +2616,48 @@ class MainWindow(QWidget):
 
     # ---------- 运行 ----------
     def _log(self, s):
-        self.log.appendPlainText(time.strftime("[%H:%M:%S] ") + s)
+        line = time.strftime("[%H:%M:%S] ") + s
+        self.log.appendPlainText(line)
+        fh = getattr(self, "_log_fh", None)
+        if fh is not None:
+            try:
+                fh.write(line + "\n")
+                fh.flush()
+            except Exception:
+                pass
 
-    def _progress(self, stage, pct, info):
+    def _progress(self, stage, pct, info, stage_remain=-1.0):
         self.pb.setValue(int(max(0.0, min(pct, 100.0)) * 10))
         self.lbl_pct.setText("%.1f%%" % pct)
         name = STAGE_NAMES.get(stage)
         if name:
             self.lbl_stage.setText(name)
         self.lbl_stat.setText(info)
-        self._update_total_eta(pct)
+        self._update_total_eta(pct, stage, stage_remain)
 
-    def _update_total_eta(self, pct):
-        """总剩余时长（覆盖解流/编码/音频/混流全部阶段）：
-        用任务已耗时按整体完成百分比外推，随进度自动校准。"""
-        t0 = getattr(self, "_job_t0", None)
-        if t0 is None:
+    def _update_total_eta(self, pct, stage="", stage_remain=-1.0):
+        """总剩余时长 = 当前阶段剩余（实测速度外推） + 后续阶段预估（开始前的计划）。
+
+        阶段内剩余由任务线程按实测速度计算（准确、稳定），避免整体百分比
+        外推导致的"总剩余比本阶段剩余还短 / 不断上涨"问题。
+        """
+        if pct >= 99.9 or getattr(self, "_job_t0", None) is None:
             self.lbl_eta.setText("")
             return
-        if pct >= 99.9:
-            self.lbl_eta.setText("")
+        plan = getattr(self, "_stage_plan", None) or {}
+        after = {"demux": ("encode", "audio", "mux"),
+                 "encode": ("audio", "mux"),
+                 "audio": ("mux",),
+                 "mux": ()}.get(stage, ())
+        est_after = sum(float(plan.get(k, 0.0) or 0.0) for k in after)
+        if stage_remain is not None and stage_remain > 0:
+            self.lbl_eta.setText(
+                "总剩余约 %s" % fmt_time(stage_remain + est_after))
             return
-        elapsed = time.time() - t0
+        if stage and not plan:
+            self.lbl_eta.setText("总剩余：计算中...")
+            return
+        elapsed = time.time() - self._job_t0
         if pct < 2.0 or elapsed < 5.0:
             self.lbl_eta.setText("总剩余：计算中...")
             return
@@ -2617,6 +2681,7 @@ class MainWindow(QWidget):
         self._repolish(self.btn_start)
         self._job_t0 = None
         self.lbl_eta.setText("")
+        self._lock_params(False)
         self._update_start_enabled()
 
     def _start_or_pause(self):
@@ -2640,8 +2705,43 @@ class MainWindow(QWidget):
         else:
             self.start()
 
+    def _open_log(self, tag="转换"):
+        """任务开始时立即创建日志文件；此后每条日志实时写入（失败 / 取消均保留）"""
+        self._log_fh = None
+        self._log_path = None
+        try:
+            logdir = os.path.join(_EXE_DIR, "log")
+            os.makedirs(logdir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            base = os.path.splitext(os.path.basename(self.le_out.text().strip()))[0]
+            base = re.sub(r'[\\/:*?"<>|]', "_", base) or "转换"
+            path = os.path.join(logdir, "%s_%s_%s.log" % (base, ts, tag))
+            self._log_fh = open(path, "w", encoding="utf-8")
+            self._log_path = path
+            self._log("日志文件已创建（实时写入）：%s" % path)
+            return path
+        except Exception as e:
+            self._log_fh = None
+            self._log_path = None
+            self._log("日志文件创建失败：" + str(e))
+            return None
+
+    def _close_log(self):
+        fh = getattr(self, "_log_fh", None)
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        self._log_fh = None
+
     def _save_log(self, tag=""):
-        """把日志窗口全部内容保存到软件目录 log/ 文件夹（返回路径或 None）"""
+        """日志保存：任务中已实时写入则直接返回路径；否则全量导出（兼容旧流程）"""
+        if getattr(self, "_log_path", None):
+            p = self._log_path
+            self._log("日志已保存（实时写入）：%s" % p)
+            self._close_log()
+            return p
         try:
             logdir = os.path.join(_EXE_DIR, "log")
             os.makedirs(logdir, exist_ok=True)
@@ -2700,6 +2800,8 @@ class MainWindow(QWidget):
             p = self._save_log("_失败")
             msg_err(self, "任务失败：\n" + err
                     + (("\n\n日志已保存：\n" + p) if p else ""))
+        else:
+            self._save_log("_已取消")
 
     def _source_total_bytes(self):
         total = 0
@@ -2794,6 +2896,17 @@ class MainWindow(QWidget):
         stages = self._estimate_stage_times()
         if not stages:
             return True
+        plan = {}
+        for nm, sec in stages:
+            if "解流" in nm:
+                plan["demux"] = sec
+            elif "编码" in nm:
+                plan["encode"] = sec
+            elif "音频" in nm:
+                plan["audio"] = sec
+            elif "混流" in nm:
+                plan["mux"] = sec
+        self._stage_plan = plan
         lines = ["即将开始 3D 转换，共 %d 个阶段：" % len(stages), ""]
         total = 0.0
         for i, (nm, sec) in enumerate(stages, 1):
@@ -2841,6 +2954,7 @@ class MainWindow(QWidget):
             return
         if not self._confirm_start(left, right, out):
             return
+        self._open_log("转换")
         container = self._sel(CONTAINERS, self.cmb_container.currentText(), "mkv")
         if container == "mp4" and not out.lower().endswith(".mp4"):
             out = os.path.splitext(out)[0] + ".mp4"
@@ -2905,6 +3019,7 @@ class MainWindow(QWidget):
         self._repolish(self.btn_start)
         self.btn_cancel.setEnabled(True)
         self.lbl_stage.setText("准备中")
+        self._lock_params(True)
         self._log("========== 任务参数 ==========")
         self._log("左眼源文件：%s" % left)
         self._log("右眼源文件：%s" % right)
@@ -2945,7 +3060,8 @@ class MainWindow(QWidget):
             gop=gop, audio_mode=audio_mode, audio_track=audio_track,
             open_after=self.chk_open.isChecked(), max_frames=max_frames,
             on_log=lambda s: self.bridge.log.emit(s),
-            on_progress=lambda st, pct, info: self.bridge.progress.emit(st, pct, info),
+            on_progress=lambda st, pct, info, rem=-1.0:
+                self.bridge.progress.emit(st, pct, info, rem),
             on_done=lambda o, st: self.bridge.done.emit(o, st),
             on_error=lambda e: self.bridge.error.emit(e))
         self._job_t0 = time.time()
@@ -2997,6 +3113,7 @@ class MainWindow(QWidget):
         b = QPushButton("浏览")
         b.setFixedWidth(64)
         b.clicked.connect(lambda _=None, e=le: self._pick_seg(e))
+        le._browse_btn = b
         h.addWidget(b)
         rm = QPushButton()
         rm.setObjectName("themebtn")
@@ -3024,13 +3141,44 @@ class MainWindow(QWidget):
         self._relabel_segs()
 
     def _relabel_segs(self):
+        locked = getattr(self, "_params_locked", False)
         for i, item in enumerate(self.seg_rows, 1):
             item["label"].setText("第 %d 段" % i)
-            item["rm"].setEnabled(len(self.seg_rows) > 2)
+            item["rm"].setEnabled(not locked and len(self.seg_rows) > 2)
         if hasattr(self, "btn_seg_add"):
-            self.btn_seg_add.setEnabled(len(self.seg_rows) < 16)
+            self.btn_seg_add.setEnabled(not locked and len(self.seg_rows) < 16)
         if hasattr(self, "lbl_cat_size"):
             self._refresh_summaries()
+
+    def _param_widgets(self):
+        """转换 / 拼接进行中需要锁定（暗灰不可操作）的参数控件"""
+        ws = [self.le_left, self.le_right, self.le_out, self.cmb_layout,
+              self.cmb_container, self.cmb_encoder, self.cmb_speed,
+              self.cmb_rc, self.cmb_qp, self.le_bitrate, self.cmb_track,
+              self.cmb_audio, self.le_gop, self.cmb_ffver, self.chk_open,
+              self.chk_reuse, self.le_frames, self.le_cat_out,
+              self.btn_seg_add, self.btn_concat_run]
+        for le in (self.le_left, self.le_right, self.le_out, self.le_cat_out):
+            b = getattr(le, "_browse_btn", None)
+            if b is not None:
+                ws.append(b)
+        for r in getattr(self, "seg_rows", []):
+            ws += [r["edit"], r["rm"]]
+            b = getattr(r["edit"], "_browse_btn", None)
+            if b is not None:
+                ws.append(b)
+        return ws
+
+    def _lock_params(self, locked):
+        """锁定 / 解锁参数区：任务进行中禁止修改参数（暗灰显示）"""
+        self._params_locked = bool(locked)
+        for w in self._param_widgets():
+            if w is not None:
+                w.setEnabled(not locked)
+        if not locked:
+            self._on_rc_change(self.cmb_rc.currentText())
+            self._relabel_segs()
+        self._update_start_enabled()
 
     def _on_add_seg(self):
         if len(self.seg_rows) >= 16:
@@ -3107,6 +3255,8 @@ class MainWindow(QWidget):
         self.btn_cancel.setEnabled(True)
         self.lbl_stage.setText("拼接中")
         self._job_t0 = time.time()
+        self._open_log("拼接")
+        self._lock_params(True)
         self._log("========== 无损拼接（%d 段） ==========" % len(segs))
         for i, p in enumerate(segs, 1):
             self._log("第 %d 段：%s" % (i, p))
@@ -3123,6 +3273,7 @@ class MainWindow(QWidget):
         self._concat_procs = []
         self._job_t0 = None
         self.lbl_eta.setText("")
+        self._lock_params(False)
         self.btn_concat_run.setEnabled(True)
         self.btn_concat_run.setText("开始拼接")
         self.btn_cancel.setEnabled(False)
@@ -3153,6 +3304,7 @@ class MainWindow(QWidget):
                     pass
             if self.job:
                 self.job.cancel()
+        self._close_log()
         event.accept()
 
 
@@ -3190,7 +3342,7 @@ def main():
             audio_mode=("none" if noaudio else "dual"),
             max_frames=frames, skip_demux=skipdemux, reuse_video=reuse_video,
             on_log=lambda s: print(s, flush=True),
-            on_progress=lambda st, pct, info: print(
+            on_progress=lambda st, pct, info, rem=-1.0: print(
                 "[%5.1f%%] %s %s" % (pct, st, info), flush=True))
         job.run()
         return 0
