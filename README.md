@@ -9,7 +9,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.2.1/3DBlurayConverter_v2.2.1_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.3.0/3DBlurayConverter_v2.3.0_portable.zip
 
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 

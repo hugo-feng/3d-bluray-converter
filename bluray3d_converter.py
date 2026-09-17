@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.2.1"
+APP_VERSION = "v2.3.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -340,6 +340,8 @@ THEMES = {
         disabled_bg="#24262c",
         danger="#c62828", danger_h="#d33b3b", danger_p="#a51f1f",
         hover="#26272e", chk_border="#3d4149",
+        chk_bg="#2a2b31", ok="#7ee08a", ok_bg="rgba(76,175,80,46)",
+        warn="#ff8a8a", warn_bg="rgba(211,47,47,51)",
         chev_right="chevron-right.svg", chev_down="chevron-down.svg",
         theme_icon="sun.svg"),
     "light": dict(
@@ -349,6 +351,8 @@ THEMES = {
         disabled_bg="#eeeeee",
         danger="#c62828", danger_h="#d33b3b", danger_p="#a51f1f",
         hover="#ededed", chk_border="#c0c0c0",
+        chk_bg="#e7e7ea", ok="#1e7e34", ok_bg="#e6f4ea",
+        warn="#c62828", warn_bg="#fdecea",
         chev_right="chevron-right-light.svg", chev_down="chevron-down-light.svg",
         theme_icon="moon.svg"),
 }
@@ -404,10 +408,15 @@ QProgressBar { background: @BORDER@; border: none; border-radius: 4px; }
 QProgressBar::chunk { background: @ACCENT@; border-radius: 4px; }
 QCheckBox { color: @DIM@; spacing: 8px; }
 QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px;
-                       border: 1px solid @CHK_BORDER@; background: @INPUT@; }
+                       border: 1px solid @CHK_BORDER@; background: @CHK_BG@; }
 QCheckBox::indicator:checked { background: @ACCENT@; border-color: @ACCENT@;
                                image: url("@ICONS@/check.svg"); }
 QCheckBox::indicator:hover { border-color: @ACCENT@; }
+QLabel#oklabel { color: @OK@; background: @OK_BG@; border-radius: 9px;
+                 padding: 3px 12px; font-weight: 600; }
+QLabel#warnlabel { color: @WARN@; background: @WARN_BG@; border-radius: 9px;
+                   padding: 3px 12px; font-weight: 600; }
+QLabel#plainlabel { color: transparent; background: transparent; padding: 3px 12px; }
 QPlainTextEdit { background: #101114; border: 1px solid #2e3038; border-radius: 6px;
                  color: #ccced6; padding: 6px; }
 QScrollBar:vertical { background: @BG@; width: 12px; margin: 0; }
@@ -452,6 +461,21 @@ def fmt_time(seconds):
     if seconds >= 60:
         return "%d 分 %d 秒" % (seconds // 60, seconds % 60)
     return "%d 秒" % seconds
+
+
+def fmt_size(nbytes):
+    """字节数人性化显示"""
+    try:
+        n = float(nbytes)
+    except (TypeError, ValueError):
+        return "—"
+    if n <= 0:
+        return "—"
+    for unit, div in (("TB", 1024.0 ** 4), ("GB", 1024.0 ** 3),
+                      ("MB", 1024.0 ** 2), ("KB", 1024.0)):
+        if n >= div:
+            return "%.2f %s" % (n / div, unit)
+    return "%.0f B" % n
 
 
 def to_short_path(path):
@@ -591,10 +615,11 @@ class ConvertJob(threading.Thread):
         self.reuse_video = reuse_video
         self.on_log = on_log or (lambda s: None)
         self.on_progress = on_progress or (lambda stage, pct, info: None)
-        self.on_done = on_done or (lambda out: None)
+        self.on_done = on_done or (lambda out, stats=None: None)
         self.on_error = on_error or (lambda err: None)
         self.cancel_flag = False
         self.paused = False
+        self.stats = {}
         self.proc = None
         self.workdir = ""
         self.ffmpeg = ffmpeg or FFMPEG
@@ -659,6 +684,7 @@ class ConvertJob(threading.Thread):
 
     def run(self):
         try:
+            t_all = time.time()
             name = os.path.splitext(os.path.basename(self.left_file))[0]
             out_dir = os.path.dirname(os.path.abspath(self.out_file))
             preferred = os.path.join(out_dir, "_bd3d_work_" + name)
@@ -666,14 +692,22 @@ class ConvertJob(threading.Thread):
             if os.path.normcase(self.workdir) != os.path.normcase(preferred):
                 self._log("输出路径含非 ASCII 字符，中间文件改用：" + self.workdir)
             os.makedirs(self.workdir, exist_ok=True)
+            try:
+                self.stats["src_size"] = (os.path.getsize(self.left_file)
+                                          + os.path.getsize(self.right_file))
+            except OSError:
+                pass
             left_es = os.path.join(self.workdir, "left.264")
             right_es = os.path.join(self.workdir, "right.mvc")
             if self.skip_demux and os.path.exists(left_es) and os.path.exists(right_es):
                 self._log("[1/3] 跳过解流（使用已有流文件）")
                 nframes = self._estimate_frames()
+                self.stats["demux"] = 0.0
             else:
                 self._log("[1/3] 解流（tsMuxeR）：左眼 + 右眼")
+                t_demux = time.time()
                 left_es, right_es, nframes = self._demux(name)
+                self.stats["demux"] = time.time() - t_demux
             if nframes <= 0:
                 nframes = self._estimate_frames()
             if nframes > 0:
@@ -696,6 +730,11 @@ class ConvertJob(threading.Thread):
 
             self._encode(left_es, right_es, nframes, audio_src, audio_idx, audio_codec)
             self._check()
+            try:
+                self.stats["out_size"] = os.path.getsize(self.out_file)
+            except OSError:
+                pass
+            self.stats["total"] = time.time() - t_all
             self._log("完成：" + self.out_file)
             self._cleanup_workdir()
             self.on_progress("done", 100.0, "全部完成")
@@ -704,7 +743,7 @@ class ConvertJob(threading.Thread):
                     os.startfile(os.path.dirname(os.path.abspath(self.out_file)))
                 except Exception:
                     pass
-            self.on_done(self.out_file)
+            self.on_done(self.out_file, self.stats)
         except Cancelled:
             self._log("任务已取消，正在删除本次转换的中间文件...")
             self._cleanup_workdir()
@@ -724,9 +763,22 @@ class ConvertJob(threading.Thread):
             return
         if not os.path.basename(os.path.normpath(wd)).startswith("_bd3d_work_"):
             return
-        self._log("清理中间文件夹：%s" % wd)
+        size = 0
+        try:
+            for dirpath, dirs, files in os.walk(wd):
+                for fn in files:
+                    try:
+                        size += os.path.getsize(os.path.join(dirpath, fn))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        self.stats["work_size"] = size
+        self.stats["workdir"] = wd
+        self._log("清理中间文件夹：%s（%s）" % (wd, fmt_size(size)))
         try:
             shutil.rmtree(wd, ignore_errors=True)
+            self.stats["cleaned"] = not os.path.isdir(wd)
         except Exception:
             pass
 
@@ -899,7 +951,10 @@ class ConvertJob(threading.Thread):
                       "请取消勾选「复用已完成的编码」后重新开始")
             self.on_progress("encode", DEMUX_WEIGHT + VIDEO_WEIGHT,
                              "复用已完成的编码结果")
+            self.stats["encode"] = 0.0
+            self.stats["reused"] = True
         else:
+            t_enc = time.time()
             avs_path = os.path.join(self.workdir, "decode.avs")
             with open(avs_path, "w", encoding="utf-8") as f:
                 f.write(self._build_avs(base, dep, nframes, total))
@@ -963,6 +1018,7 @@ class ConvertJob(threading.Thread):
             self._check()
             if p.returncode != 0:
                 raise RuntimeError("视频编码失败（ffmpeg 返回码 %s）" % p.returncode)
+            self.stats["encode"] = time.time() - t_enc
 
 
         # ---- 阶段 2B：提取音频到独立文件（顺序 I/O）----
@@ -970,6 +1026,8 @@ class ConvertJob(threading.Thread):
             if os.path.exists(self.out_file):
                 os.remove(self.out_file)
             os.replace(tmp_video, self.out_file)
+            self.stats["audio"] = 0.0
+            self.stats["mux"] = 0.0
             return
         dur = total * 1001.0 / 24000.0 + 0.2
         is_mp4 = self.container == "mp4"
@@ -982,6 +1040,7 @@ class ConvertJob(threading.Thread):
                                  ["-c:a", "aac", "-b:a", "512k", "-ac", "6"]))
         audio_files = []
         base_pct = DEMUX_WEIGHT + VIDEO_WEIGHT
+        t_aud = time.time()
         for ai, (apath, aopts) in enumerate(extract_jobs):
             mode_txt = {"copy": "原样直通", "flac": "无损转 FLAC",
                         "ac3": "转码 AC3", "aac": "转码 AAC"}.get(aopts[1], aopts[1])
@@ -1019,8 +1078,10 @@ class ConvertJob(threading.Thread):
             if p.returncode != 0:
                 raise RuntimeError("音频提取失败（ffmpeg 返回码 %s）" % p.returncode)
             audio_files.append(apath)
+        self.stats["audio"] = time.time() - t_aud
 
         # ---- 阶段 2C：混流（纯顺序 I/O）----
+        t_mux = time.time()
         cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
                "-i", tmp_video]
         for a in audio_files:
@@ -1069,6 +1130,7 @@ class ConvertJob(threading.Thread):
         self._check()
         if p.returncode != 0:
             raise RuntimeError("混流失败（ffmpeg 返回码 %s）" % p.returncode)
+        self.stats["mux"] = time.time() - t_mux
         try:
             os.remove(tmp_video)
         except OSError:
@@ -1238,11 +1300,12 @@ class Bridge(QObject):
     """线程 -> UI 的信号桥"""
     log = Signal(str)
     progress = Signal(str, float, str)
-    done = Signal(str)
+    done = Signal(str, object)
     error = Signal(str)
     concat_progress = Signal(float, str)
     concat_done = Signal(str)
     src_stats = Signal(object)
+    dur_check = Signal(object, object)
     gpu_info = Signal(object)
 
 
@@ -1441,6 +1504,7 @@ class MainWindow(QWidget):
         self.bridge.concat_progress.connect(self._concat_progress)
         self.bridge.concat_done.connect(self._concat_done)
         self.bridge.src_stats.connect(self._apply_src_stats)
+        self.bridge.dur_check.connect(self._apply_dur_check)
         self.bridge.gpu_info.connect(self._apply_gpu_info)
 
         self.setWindowTitle(APP_TITLE)
@@ -1451,6 +1515,7 @@ class MainWindow(QWidget):
         self._src_dur = 0.0
         self._src_fps = 0.0
         self._src_a_kbps = 0.0
+        self._dur_pair = (None, None)
         self._src_timer = QTimer(self)
         self._src_timer.setSingleShot(True)
         self._src_timer.setInterval(500)
@@ -1676,6 +1741,9 @@ class MainWindow(QWidget):
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self.cancel)
         brow.addWidget(self.btn_cancel)
+        self.lbl_dur_check = QLabel("")
+        self.lbl_dur_check.setObjectName("plainlabel")
+        brow.addWidget(self.lbl_dur_check)
         brow.addStretch(1)
         root.addLayout(brow)
 
@@ -1819,6 +1887,26 @@ class MainWindow(QWidget):
             if pm is not None:
                 item["rm"].setIcon(QIcon(pm))
                 item["rm"].setIconSize(pm.size())
+        self._apply_checkbox_qss()
+        if getattr(self, "_dur_pair", (None, None)) != (None, None):
+            self._apply_dur_check(*self._dur_pair)
+
+    def _apply_checkbox_qss(self):
+        """复选框样式：勾选＝蓝底+√；未勾选＝灰底+无√（控件级样式，主题联动）"""
+        c = THEMES.get(self._theme, THEMES["dark"])
+        ck_qss = (
+            "QCheckBox { color: %(dim)s; spacing: 8px; }"
+            "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px;"
+            " border: 1px solid %(border)s; background: %(bg)s; }"
+            "QCheckBox::indicator:checked { background: %(accent)s;"
+            " border-color: %(accent)s; image: url(\"%(icon)s\"); }"
+            "QCheckBox::indicator:hover { border-color: %(accent)s; }"
+            % {"dim": c["dim"], "border": c["chk_border"], "bg": c["chk_bg"],
+               "accent": c["accent"], "icon": ICONS_DIR.replace("\\", "/") + "/check.svg"}
+        )
+        for ck in (getattr(self, "chk_open", None), getattr(self, "chk_reuse", None)):
+            if ck is not None:
+                ck.setStyleSheet(ck_qss)
         self._apply_titlebar()
 
     def _apply_titlebar(self):
@@ -1868,16 +1956,53 @@ class MainWindow(QWidget):
         self._src_dur = 0.0
         self._src_fps = 0.0
         self._src_a_kbps = 0.0
+        self.lbl_dur_check.setText("")
+        self.lbl_dur_check.setObjectName("plainlabel")
         self._src_timer.start()
 
     def _src_probe_now(self):
-        p = self.le_left.text().strip() or self.le_right.text().strip()
+        left = self.le_left.text().strip()
+        right = self.le_right.text().strip()
+        p = left if (left and os.path.exists(left)) else right
         if not p or not os.path.exists(p):
             self._update_size_estimate()
+            self._apply_dur_check(None, None)
             return
-        threading.Thread(
-            target=lambda: self.bridge.src_stats.emit(probe_source_stats(p)),
-            daemon=True).start()
+
+        def work():
+            stats = probe_source_stats(p)
+            ld = rd = None
+            if left and os.path.exists(left):
+                s = probe_source_stats(left)
+                ld = s[0] if s else None
+            if right and os.path.exists(right):
+                s = probe_source_stats(right)
+                rd = s[0] if s else None
+            self.bridge.src_stats.emit(stats)
+            self.bridge.dur_check.emit(ld, rd)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_dur_check(self, ld, rd):
+        """左右眼时长校验：一致显示绿色圆弧标签，不一致红色警示（防止选错配对）"""
+        self._dur_pair = (ld, rd)
+        c = THEMES.get(self._theme, THEMES["dark"])
+        base = "border-radius: 9px; padding: 3px 12px; font-weight: 600;"
+        if not ld or not rd:
+            self.lbl_dur_check.setText("")
+            self.lbl_dur_check.setStyleSheet("padding: 3px 12px;")
+            return
+        diff = abs(ld - rd)
+        if diff <= 1.0:
+            self.lbl_dur_check.setText("✓ 左右眼时长校验一致（%s）" % fmt_time(ld))
+            self.lbl_dur_check.setStyleSheet(
+                "color: %s; background: %s; %s" % (c["ok"], c["ok_bg"], base))
+        else:
+            self.lbl_dur_check.setText(
+                "✗ 左右眼时长不一致（左 %s / 右 %s，相差 %s），请检查配对！"
+                % (fmt_time(ld), fmt_time(rd), fmt_time(diff)))
+            self.lbl_dur_check.setStyleSheet(
+                "color: %s; background: %s; %s" % (c["warn"], c["warn_bg"], base))
 
     def _apply_src_stats(self, stats):
         if stats:
@@ -2131,12 +2256,31 @@ class MainWindow(QWidget):
         else:
             self.start()
 
-    def _done(self, out):
+    def _done(self, out, stats):
         self._reset_start_btn()
         self.btn_cancel.setEnabled(False)
         self.lbl_stage.setText("完成")
-        self._progress(100.0, "输出：" + out)
-        QMessageBox.information(self, APP_TITLE, "转换完成！\n\n" + out)
+        self._progress("done", 100.0, "输出：" + out)
+        st = stats or {}
+        lines = ["转换完成！", "", out, "", "各阶段耗时："]
+        lines.append("  解流：%s" % fmt_time(st.get("demux")))
+        lines.append("  编码：%s%s" % (
+            fmt_time(st.get("encode")),
+            "（复用已完成结果）" if st.get("reused") else ""))
+        lines.append("  音频提取：%s" % fmt_time(st.get("audio")))
+        lines.append("  混流封装：%s" % fmt_time(st.get("mux")))
+        lines.append("  合计：%s" % fmt_time(st.get("total")))
+        lines.append("")
+        lines.append("文件大小：")
+        lines.append("  源文件合计：%s" % fmt_size(st.get("src_size")))
+        lines.append("  输出成品：%s" % fmt_size(st.get("out_size")))
+        if st.get("work_size"):
+            if st.get("cleaned"):
+                lines.append("  中间文件：%s（已自动清理）" % fmt_size(st.get("work_size")))
+            else:
+                lines.append("  中间文件：%s（保留在 %s）" % (
+                    fmt_size(st.get("work_size")), st.get("workdir") or ""))
+        QMessageBox.information(self, APP_TITLE, "\n".join(lines))
 
     def _fail(self, err):
         self._reset_start_btn()
@@ -2340,7 +2484,7 @@ class MainWindow(QWidget):
             open_after=self.chk_open.isChecked(), max_frames=max_frames,
             on_log=lambda s: self.bridge.log.emit(s),
             on_progress=lambda st, pct, info: self.bridge.progress.emit(st, pct, info),
-            on_done=lambda o: self.bridge.done.emit(o),
+            on_done=lambda o, st: self.bridge.done.emit(o, st),
             on_error=lambda e: self.bridge.error.emit(e))
         self.job.start()
 
