@@ -9,7 +9,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.3.3/3DBlurayConverter_v2.3.3_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.4.0/3DBlurayConverter_v2.4.0_portable.zip
 
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 
@@ -43,6 +43,8 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.3.3/3DBlur
   长时间无输出时自动提示"仍在运行"（大文件写盘 / 解码器初始化较慢时不再像卡死）
 - **左右眼时长校验**：选择左右眼后自动比对时长——一致显示绿色圆弧标签，
   不一致红色警示并提示检查配对（防右眼黑块 / 拖影）
+- **自动匹配右眼**：选择左眼后自动扫描同目录同格式文件，按「文件名相邻 + 时长一致」
+  自动配对右眼（如 00003 → 00004、00005 → 00006），约 0.3 秒完成
 - **完成统计与日志**：转换完成后弹窗展示各阶段耗时与源文件 / 成品 / 中间文件大小；
   完整日志自动保存到软件目录 `log\` 文件夹
 - **暂停 / 断点续转**：转换中可随时暂停（挂起当前阶段）与继续，进度不丢失；

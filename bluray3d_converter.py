@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.3.3"
+APP_VERSION = "v2.4.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -238,6 +238,32 @@ def probe_encoder(encoder, speed, rc, qp, bitrate, gop, ffmpeg=None):
     msg = ((r.stderr or "") + (r.stdout or "")).strip()
     lines = [ln for ln in msg.splitlines() if ln.strip()]
     return False, "\n".join(lines[-4:])[:400]
+
+
+def probe_duration(path):
+    """读取媒体时长（秒）：优先 tsMuxeR 读头探测（对纯 MVC 从属流也是秒级），
+    失败时回退 ffprobe。失败返回 0.0"""
+    try:
+        r = run_hidden([TSMUXER, path])
+        out = (r.stdout or "") + (r.stderr or "")
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out)
+        if m:
+            return (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                    + float(m.group(3)))
+    except Exception:
+        pass
+    try:
+        r = run_hidden([FFPROBE, "-v", "error", "-show_entries",
+                        "format=duration", "-of", "default=nw=1:nk=1", path])
+        return float((r.stdout or "0").strip() or 0)
+    except Exception:
+        return 0.0
+
+
+def _name_number(name):
+    """提取文件名中的第一段数字（如 00004.m2ts -> 4），无则返回 None"""
+    m = re.search(r"(\d+)", name)
+    return int(m.group(1)) if m else None
 
 
 def probe_source_stats(path):
@@ -1330,6 +1356,7 @@ class Bridge(QObject):
     concat_done = Signal(str)
     src_stats = Signal(object)
     dur_check = Signal(object, object)
+    right_match = Signal(object)
     gpu_info = Signal(object)
 
 
@@ -1529,6 +1556,7 @@ class MainWindow(QWidget):
         self.bridge.concat_done.connect(self._concat_done)
         self.bridge.src_stats.connect(self._apply_src_stats)
         self.bridge.dur_check.connect(self._apply_dur_check)
+        self.bridge.right_match.connect(self._apply_right_match)
         self.bridge.gpu_info.connect(self._apply_gpu_info)
 
         self.setWindowTitle(APP_TITLE)
@@ -2052,8 +2080,17 @@ class MainWindow(QWidget):
         self._update_start_enabled()
 
     def _update_start_enabled(self):
-        """时长校验完成前禁用开始按钮（转换运行中不干预）"""
+        """仅当左右眼都已选择且校验尚未完成时，短暂禁用开始按钮；其余情况不受影响。
+
+        注意：时长校验只服务于「3D 蓝光左右眼 → SBS」的转换场景，
+        与「无损拼接」流程完全无关（拼接按钮不受任何影响）。
+        """
         if (self.job and self.job.is_alive()) or self._concat_running:
+            return
+        left = self.le_left.text().strip()
+        right = self.le_right.text().strip()
+        if not (left and right):
+            self.btn_start.setEnabled(True)
             return
         self.btn_start.setEnabled(bool(getattr(self, "_dur_ready", False)))
 
@@ -2196,11 +2233,12 @@ class MainWindow(QWidget):
             "蓝光视频流 (*.m2ts *.mts);;所有文件 (*)")
         if p:
             self.le_left.setText(p)
+            self.le_right.clear()
             if not self.le_out.text():
                 base = os.path.splitext(os.path.basename(p))[0]
                 self.le_out.setText(os.path.join(os.path.dirname(p), "..",
                                                  "..", "..", "sbs_" + base + ".mkv"))
-            self._auto_pair(p, True)
+            self._auto_match_right(p)
             self._refresh_tracks(p)
 
     def pick_right(self):
@@ -2246,6 +2284,56 @@ class MainWindow(QWidget):
         elif not is_left and not self.le_left.text().strip():
             self.le_left.setText(tp)
             self._log("已自动配对左眼文件：%s" % target)
+
+    def _auto_match_right(self, left_path):
+        """扫描左眼所在目录的同格式文件，按「文件名相邻优先 + 时长一致」自动匹配右眼"""
+        def work():
+            d = os.path.dirname(left_path)
+            ext = os.path.splitext(left_path)[1].lower()
+            left_dur = probe_duration(left_path)
+            if left_dur <= 0:
+                self.bridge.right_match.emit((left_path, None))
+                return
+            try:
+                cands = [os.path.join(d, f) for f in os.listdir(d)
+                         if f.lower().endswith(ext)
+                         and os.path.normcase(os.path.join(d, f))
+                         != os.path.normcase(left_path)]
+            except OSError:
+                self.bridge.right_match.emit((left_path, None))
+                return
+            if not cands:
+                self.bridge.right_match.emit((left_path, None))
+                return
+            lnum = _name_number(os.path.basename(left_path))
+            if lnum is not None:
+                def rank(p):
+                    n = _name_number(os.path.basename(p))
+                    return abs(n - lnum) if n is not None else 10 ** 9
+                cands.sort(key=rank)
+            self.bridge.log.emit("正在自动匹配右眼（核对候选文件时长）...")
+            best = None
+            for i, p in enumerate(cands):
+                if i >= 8:
+                    break
+                dur = probe_duration(p)
+                if dur > 0 and abs(dur - left_dur) <= 1.0:
+                    best = p
+                    break
+            self.bridge.right_match.emit((left_path, best))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_right_match(self, payload):
+        left_snapshot, matched = payload
+        if self.le_left.text().strip() != left_snapshot:
+            return
+        if matched and not self.le_right.text().strip():
+            self.le_right.setText(matched)
+            self._log("已自动匹配右眼：%s（时长与左眼一致）"
+                      % os.path.basename(matched))
+        elif not matched:
+            self._log("未在左眼目录找到时长一致的同格式文件，请手动选择右眼")
 
     def _refresh_tracks(self, m2ts):
         def work():
