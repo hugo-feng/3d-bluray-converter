@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.4.0"
+APP_VERSION = "v2.4.1"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -266,8 +266,38 @@ def _name_number(name):
     return int(m.group(1)) if m else None
 
 
+AUDIO_KBPS_EST = {
+    "LPCM": 4608, "DTS-HD": 2500, "DTS-EXPRESS": 768, "DTS": 1509,
+    "TRUE-HD": 3000, "E-AC3": 768, "AC3": 640, "AAC": 384,
+    "MPEG-AUDIO": 320, "MPEG-2 AUDIO": 320, "VORBIS": 320, "OPUS": 320,
+}
+
+
 def probe_source_stats(path):
-    """读取源统计数据（单次 ffprobe）：(时长秒, 帧率, 音轨总码率 kbps)"""
+    """读取源统计数据（tsMuxeR 单次读头，秒级）：(时长秒, 帧率, 音轨总码率 kbps)"""
+    try:
+        r = run_hidden([TSMUXER, path])
+        out = (r.stdout or "") + (r.stderr or "")
+        dur = 0.0
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out)
+        if m:
+            dur = (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                   + float(m.group(3)))
+        fps = 0.0
+        m = re.search(r"Frame rate:\s*([\d.]+)", out)
+        if m:
+            fps = float(m.group(1))
+        a_kbps = 0.0
+        for t in re.findall(r"Stream type:\s*([A-Za-z0-9\- ]+)", out):
+            t = t.strip().upper()
+            for key, kbps in AUDIO_KBPS_EST.items():
+                if key in t:
+                    a_kbps += kbps
+                    break
+        if dur > 0 or fps > 0:
+            return (dur, fps, a_kbps)
+    except Exception:
+        pass
     try:
         r = run_hidden([FFPROBE, "-v", "error", "-show_entries",
                         "stream=codec_type,r_frame_rate,bit_rate:format=duration",
@@ -920,9 +950,9 @@ class ConvertJob(threading.Thread):
 
     def _estimate_frames(self):
         try:
-            p = run_hidden([FFPROBE, "-v", "error", "-show_entries",
-                            "format=duration", "-of", "csv=p=0", self.left_file])
-            dur = float(p.stdout.strip())
+            dur = probe_duration(self.left_file)
+            if dur <= 0:
+                return 0
             return max(int(dur * 24000 / 1001) - 3, 1)
         except Exception:
             return 0
@@ -1357,6 +1387,7 @@ class Bridge(QObject):
     src_stats = Signal(object)
     dur_check = Signal(object, object)
     right_match = Signal(object)
+    tracks = Signal(object)
     gpu_info = Signal(object)
 
 
@@ -1557,6 +1588,7 @@ class MainWindow(QWidget):
         self.bridge.src_stats.connect(self._apply_src_stats)
         self.bridge.dur_check.connect(self._apply_dur_check)
         self.bridge.right_match.connect(self._apply_right_match)
+        self.bridge.tracks.connect(self._apply_tracks)
         self.bridge.gpu_info.connect(self._apply_gpu_info)
 
         self.setWindowTitle(APP_TITLE)
@@ -2029,13 +2061,7 @@ class MainWindow(QWidget):
             res = {}
 
             def probe_dur(k, p):
-                try:
-                    r = run_hidden([FFPROBE, "-v", "error", "-show_entries",
-                                    "format=duration", "-of",
-                                    "default=nw=1:nk=1", p])
-                    res[k] = float((r.stdout or "0").strip() or 0)
-                except Exception:
-                    res[k] = 0.0
+                res[k] = probe_duration(p)
 
             def probe_stats(p):
                 res["stats"] = probe_source_stats(p)
@@ -2339,7 +2365,7 @@ class MainWindow(QWidget):
         def work():
             tracks = probe_audio_tracks(m2ts)
             if tracks:
-                QTimer.singleShot(0, lambda: self._apply_tracks(tracks))
+                self.bridge.tracks.emit(tracks)
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_tracks(self, tracks):
