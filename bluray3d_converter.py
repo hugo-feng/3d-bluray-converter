@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.3.1"
+APP_VERSION = "v2.3.2"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -1227,6 +1227,7 @@ def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
             if on_progress:
                 on_progress(1.0, "正在读取各段信息，准备拼接...")
 
+            ok = False
             if os.path.exists(MKVMERGE):
                 cmd = [MKVMERGE, "--gui-mode", "-o", part]
                 for i, p in enumerate(files_abs):
@@ -1249,12 +1250,18 @@ def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
                         else:
                             info = "拼接中（直封装）%.0f%% · 正在估算剩余时间..." % pct
                         on_progress(pct, info)
-                    elif "#GUI#warning" in line.lower() or "warning" in line.lower():
+                    elif re.search(r"error|warning|not be appended|unsupported",
+                                   line, re.I):
                         log("  mkvmerge: " + line.strip())
                 proc.wait()
-                if proc.returncode not in (0, 1):
-                    raise RuntimeError("mkvmerge 拼接失败（退出码 %d）" % proc.returncode)
-            else:
+                ok = proc.returncode in (0, 1)
+                if not ok:
+                    log("mkvmerge 无法拼接这些轨道（退出码 %d，常见于含 FLAC 音轨的成品）"
+                        % proc.returncode)
+                    log("正在改用 ffmpeg 无损重封装方式拼接（音轨将被重新封装，质量不变）...")
+            if not ok:
+                if os.path.exists(part):
+                    os.remove(part)
                 lst = os.path.join(tempfile.gettempdir(), "_bd3d_concat_list.txt")
                 with open(lst, "w", encoding="utf-8") as f:
                     for p in files_abs:
@@ -1265,11 +1272,19 @@ def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
                 if proc_holder is not None:
                     proc_holder.append(proc)
                 for line in proc.stdout:
-                    if "error" in line.lower():
+                    if on_progress and line.strip().startswith("frame="):
+                        try:
+                            cur = int(line.split("=", 1)[1])
+                        except ValueError:
+                            cur = 0
+                        if cur > 0 and total > 0:
+                            pct = max(2.0, min(cur / total * 100.0, 98.0))
+                            on_progress(pct, "拼接中（ffmpeg 重封装）%.0f%%" % pct)
+                    elif "error" in line.lower():
                         log("  ffmpeg: " + line.strip())
                 proc.wait()
                 if proc.returncode != 0:
-                    raise RuntimeError("ffmpeg 拼接失败（退出码 %d）" % proc.returncode)
+                    raise RuntimeError("拼接失败（ffmpeg 返回码 %d）" % proc.returncode)
 
             out_info = probe_media_info(part)
             if out_info and out_info[0] > 0:
@@ -2313,6 +2328,7 @@ class MainWindow(QWidget):
         self.btn_concat_run.setText("开始拼接")
         self.lbl_stage.setText("失败")
         if err != "已取消":
+            self._log("错误：" + err)
             p = self._save_log("_失败")
             QMessageBox.critical(self, APP_TITLE,
                                  "任务失败：\n" + err
