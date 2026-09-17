@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.1.1"
+APP_VERSION = "v2.2.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -338,6 +338,7 @@ THEMES = {
         dim="#9a9ca8", faint="#6b6d78", input="#2a2c34", input_border="#2e3038",
         accent="#3574f0", accent_h="#2b5fd0", btn="#33363e", btn_h="#3d4149",
         disabled_bg="#24262c",
+        danger="#c62828", danger_h="#d33b3b", danger_p="#a51f1f",
         hover="#26272e", chk_border="#3d4149",
         chev_right="chevron-right.svg", chev_down="chevron-down.svg",
         theme_icon="sun.svg"),
@@ -346,6 +347,7 @@ THEMES = {
         dim="#5f6368", faint="#8a8d93", input="#ffffff", input_border="#d6d6d6",
         accent="#3574f0", accent_h="#2b5fd0", btn="#f5f5f5", btn_h="#ebebeb",
         disabled_bg="#eeeeee",
+        danger="#c62828", danger_h="#d33b3b", danger_p="#a51f1f",
         hover="#ededed", chk_border="#c0c0c0",
         chev_right="chevron-right-light.svg", chev_down="chevron-down-light.svg",
         theme_icon="moon.svg"),
@@ -393,6 +395,11 @@ QPushButton#accent { background: @ACCENT@; border: 1px solid @ACCENT@;
 QPushButton#accent:hover { background: @ACCENT_H@; }
 QPushButton#accent:disabled { background: #2b3f66; border-color: #2b3f66;
                               color: #9aa5b8; }
+QPushButton#danger { background: @DANGER@; color: #ffffff; border: none;
+            border-radius: 6px; padding: 7px 14px; font-weight: 600; }
+QPushButton#danger:hover { background: @DANGER_H@; }
+QPushButton#danger:pressed { background: @DANGER_P@; }
+QPushButton#danger:disabled { background: @DISABLED_BG@; color: @DISABLED_FG@; }
 QProgressBar { background: @BORDER@; border: none; border-radius: 4px; }
 QProgressBar::chunk { background: @ACCENT@; border-radius: 4px; }
 QCheckBox { color: @DIM@; spacing: 8px; }
@@ -587,6 +594,7 @@ class ConvertJob(threading.Thread):
         self.on_done = on_done or (lambda out: None)
         self.on_error = on_error or (lambda err: None)
         self.cancel_flag = False
+        self.paused = False
         self.proc = None
         self.workdir = ""
         self.ffmpeg = ffmpeg or FFMPEG
@@ -594,11 +602,53 @@ class ConvertJob(threading.Thread):
     def cancel(self):
         self.cancel_flag = True
         p = self.proc
-        if p is not None and p.poll() is None:
+        if p is not None:
             try:
+                if self.paused:
+                    self.resume()
                 p.terminate()
             except Exception:
                 pass
+
+    def pause(self):
+        """暂停：挂起当前子进程，进度保留（支持断点续转）"""
+        if self.paused:
+            return True
+        p = self.proc
+        if p is None or p.poll() is not None:
+            return False
+        try:
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x1F0FFF, False, p.pid)
+            if not h:
+                return False
+            ctypes.windll.ntdll.NtSuspendProcess(ctypes.c_void_p(h))
+            ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(h))
+            self.paused = True
+            self._log("已暂停（进度保留，点击「继续转换」可断点续转）")
+            return True
+        except Exception as e:
+            self._log("暂停失败：" + str(e))
+            return False
+
+    def resume(self):
+        """继续：恢复被挂起的子进程"""
+        if not self.paused:
+            return True
+        p = self.proc
+        try:
+            import ctypes
+            if p is not None and p.poll() is None:
+                h = ctypes.windll.kernel32.OpenProcess(0x1F0FFF, False, p.pid)
+                if h:
+                    ctypes.windll.ntdll.NtResumeProcess(ctypes.c_void_p(h))
+                    ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(h))
+            self.paused = False
+            self._log("已继续转换")
+            return True
+        except Exception as e:
+            self._log("继续失败：" + str(e))
+            return False
 
     def _check(self):
         if self.cancel_flag:
@@ -656,10 +706,8 @@ class ConvertJob(threading.Thread):
                     pass
             self.on_done(self.out_file)
         except Cancelled:
-            self._log("任务已取消")
-            if self.workdir and os.path.isdir(self.workdir):
-                self._log("中间文件夹已保留：%s（重跑相同任务可复用已完成部分）"
-                          % self.workdir)
+            self._log("任务已取消，正在删除本次转换的中间文件...")
+            self._cleanup_workdir()
             self.on_error("已取消")
         except Exception as e:
             self._log("错误：" + str(e))
@@ -688,6 +736,9 @@ class ConvertJob(threading.Thread):
 
         def loop():
             while not holder["stop"].wait(20):
+                if self.paused:
+                    holder["t"] = time.time()
+                    continue
                 gap = time.time() - holder["t"]
                 if gap > 60:
                     self._log("…%s 仍在运行（已 %.0f 秒无新输出；大文件写盘 / "
@@ -1584,7 +1635,8 @@ class MainWindow(QWidget):
             self._add_seg_row("")
         self.le_cat_out = QLineEdit(self.cfg.get("cat_out", ""))
         self._file_row(self.sec_cat.body_layout, "保存全片", self.le_cat_out,
-                       self.pick_cat_out, "先选好保存位置，再点右侧「开始拼接」")
+                       self.pick_cat_out, "先选好保存位置，再点右侧「开始拼接」",
+                       right_pad=30)
         r = QHBoxLayout()
         self.btn_seg_add = QPushButton("添加分段")
         self.btn_seg_add.setFixedWidth(90)
@@ -1604,7 +1656,7 @@ class MainWindow(QWidget):
         self.btn_start = QPushButton("开始转换")
         self.btn_start.setObjectName("accent")
         self.btn_start.setFixedWidth(130)
-        self.btn_start.clicked.connect(self.start)
+        self.btn_start.clicked.connect(self._start_or_pause)
         brow.addWidget(self.btn_start)
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setFixedWidth(90)
@@ -1701,7 +1753,7 @@ class MainWindow(QWidget):
         if i >= 0:
             cb.setCurrentIndex(i)
 
-    def _file_row(self, parent, label, le, browse_cmd, hint=""):
+    def _file_row(self, parent, label, le, browse_cmd, hint="", right_pad=0):
         row = QHBoxLayout()
         lb = QLabel(label)
         lb.setFixedWidth(64)
@@ -1711,6 +1763,10 @@ class MainWindow(QWidget):
         b.setFixedWidth(64)
         b.clicked.connect(browse_cmd)
         row.addWidget(b)
+        if right_pad:
+            spacer = QWidget()
+            spacer.setFixedWidth(right_pad)
+            row.addWidget(spacer)
         parent.addLayout(row)
         h = QLabel(hint)
         h.setObjectName("faintlabel")
@@ -2032,15 +2088,45 @@ class MainWindow(QWidget):
         self.lbl_pct.setText("%.1f%%" % pct)
         self.lbl_stat.setText(info)
 
-    def _done(self, out):
+    def _repolish(self, w):
+        w.style().unpolish(w)
+        w.style().polish(w)
+
+    def _reset_start_btn(self):
         self.btn_start.setEnabled(True)
+        self.btn_start.setText("开始转换")
+        self.btn_start.setObjectName("accent")
+        self._repolish(self.btn_start)
+
+    def _start_or_pause(self):
+        """开始 / 暂停 / 继续 三态按钮"""
+        if self.job and self.job.is_alive():
+            if self.job.paused:
+                self.job.resume()
+                self.btn_start.setText("暂停")
+                self.btn_start.setObjectName("danger")
+                self._repolish(self.btn_start)
+                self.lbl_stage.setText("转换中")
+            else:
+                if self.job.pause():
+                    self.btn_start.setText("继续转换")
+                    self.btn_start.setObjectName("accent")
+                    self._repolish(self.btn_start)
+                    self.lbl_stage.setText("已暂停")
+                else:
+                    self._log("当前阶段无法暂停（可能在阶段切换中），请稍后再试")
+        else:
+            self.start()
+
+    def _done(self, out):
+        self._reset_start_btn()
         self.btn_cancel.setEnabled(False)
         self.lbl_stage.setText("完成")
         self._progress(100.0, "输出：" + out)
         QMessageBox.information(self, APP_TITLE, "转换完成！\n\n" + out)
 
     def _fail(self, err):
-        self.btn_start.setEnabled(True)
+        self._reset_start_btn()
         self.btn_cancel.setEnabled(False)
         self._concat_running = False
         self._concat_procs = []
@@ -2194,7 +2280,10 @@ class MainWindow(QWidget):
         self._log("编码器预检通过：%s（FFmpeg %s）" % (
             self.cmb_encoder.currentText(), eff_ver))
         self._save_cfg()
-        self.btn_start.setEnabled(False)
+        self.btn_start.setEnabled(True)
+        self.btn_start.setText("暂停")
+        self.btn_start.setObjectName("danger")
+        self._repolish(self.btn_start)
         self.btn_cancel.setEnabled(True)
         self.lbl_stage.setText("准备中")
         self._log("========== 任务参数 ==========")
@@ -2244,6 +2333,12 @@ class MainWindow(QWidget):
 
     def cancel(self):
         if self._concat_running:
+            r = QMessageBox.warning(
+                self, APP_TITLE,
+                "确定要取消拼接吗？\n\n已写入的临时文件会被清理，需要重新开始。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if r != QMessageBox.Yes:
+                return
             self._log("正在取消拼接...")
             for proc in self._concat_procs:
                 try:
@@ -2252,7 +2347,17 @@ class MainWindow(QWidget):
                     pass
             return
         if self.job:
-            self._log("正在取消...")
+            r = QMessageBox.warning(
+                self, APP_TITLE,
+                "确定要取消本次转换吗？\n\n"
+                "取消会【删除所有中间文件】——包括已完成的解流、已编码的视频等\n"
+                "全部进行中的进度，之后无法断点续转。\n\n"
+                "若想保留进度稍后继续，请改点「暂停」或直接关闭窗口。\n\n"
+                "确定取消并删除全部进度吗？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if r != QMessageBox.Yes:
+                return
+            self._log("正在取消（将删除中间文件）...")
             self.lbl_stage.setText("正在取消")
             self.job.cancel()
 
@@ -2410,8 +2515,12 @@ class MainWindow(QWidget):
 
     def closeEvent(self, event):
         if (self.job and self.job.is_alive()) or self._concat_running:
-            r = QMessageBox.question(self, APP_TITLE, "任务进行中，确定要退出吗？",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            r = QMessageBox.question(
+                self, APP_TITLE,
+                "任务仍在进行中，确定要退出吗？\n\n"
+                "退出会终止当前任务，但【保留】中间文件进度——\n"
+                "下次对同一任务点击开始，会自动断点续转。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if r != QMessageBox.Yes:
                 event.ignore()
                 return
