@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.3.2"
+APP_VERSION = "v2.3.3"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -1266,20 +1266,28 @@ def concat_files(files, out_file, on_log=None, on_progress=None, on_done=None,
                 with open(lst, "w", encoding="utf-8") as f:
                     for p in files_abs:
                         f.write("file '%s'\n" % p.replace("\\", "/"))
-                proc = popen_hidden([FFMPEG, "-hide_banner", "-y", "-f", "concat",
-                                     "-safe", "0", "-i", lst, "-c", "copy",
-                                     "-map", "0", part])
+                proc = popen_hidden([FFMPEG, "-hide_banner", "-y", "-nostats",
+                                     "-progress", "pipe:1",
+                                     "-f", "concat", "-safe", "0", "-i", lst,
+                                     "-c", "copy", "-map", "0", part])
                 if proc_holder is not None:
                     proc_holder.append(proc)
+                t_ff = time.time()
                 for line in proc.stdout:
-                    if on_progress and line.strip().startswith("frame="):
+                    line = line.strip()
+                    if on_progress and line.startswith("out_time_us="):
                         try:
-                            cur = int(line.split("=", 1)[1])
+                            sec = int(line.split("=", 1)[1]) / 1e6
                         except ValueError:
-                            cur = 0
-                        if cur > 0 and total > 0:
-                            pct = max(2.0, min(cur / total * 100.0, 98.0))
-                            on_progress(pct, "拼接中（ffmpeg 重封装）%.0f%%" % pct)
+                            continue
+                        pct = max(2.0, min(sec / max(total, 1) * 100.0, 98.0))
+                        el = time.time() - t_ff
+                        speed = sec / el if el > 0.5 and sec > 0.5 else 0
+                        remain = (total - sec) / speed if speed > 0.01 else 0
+                        info = "拼接中（ffmpeg 重封装）%.0f%% · %s" % (
+                            pct, ("剩余约 " + fmt_time(remain)) if remain > 3
+                            else "即将完成")
+                        on_progress(pct, info)
                     elif "error" in line.lower():
                         log("  ffmpeg: " + line.strip())
                 proc.wait()
@@ -1532,9 +1540,10 @@ class MainWindow(QWidget):
         self._src_fps = 0.0
         self._src_a_kbps = 0.0
         self._dur_pair = (None, None)
+        self._dur_ready = False
         self._src_timer = QTimer(self)
         self._src_timer.setSingleShot(True)
-        self._src_timer.setInterval(500)
+        self._src_timer.setInterval(350)
         self._src_timer.timeout.connect(self._src_probe_now)
         try:
             self.setWindowIcon(QIcon(ICON_PATH))
@@ -1824,6 +1833,7 @@ class MainWindow(QWidget):
         self._refresh_summaries()
         self._log("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
         self._src_timer.start()
+        self._update_start_enabled()
         QTimer.singleShot(300, self._detect_gpu_async)
 
     # ---------- UI 工具 ----------
@@ -1972,30 +1982,45 @@ class MainWindow(QWidget):
         self._src_dur = 0.0
         self._src_fps = 0.0
         self._src_a_kbps = 0.0
+        self._dur_pair = (None, None)
+        self._dur_ready = False
         self.lbl_dur_check.setText("")
-        self.lbl_dur_check.setObjectName("plainlabel")
+        self.lbl_dur_check.setVisible(False)
+        self._update_start_enabled()
         self._src_timer.start()
 
     def _src_probe_now(self):
         left = self.le_left.text().strip()
         right = self.le_right.text().strip()
-        p = left if (left and os.path.exists(left)) else right
-        if not p or not os.path.exists(p):
+        if not left or not right or not (os.path.exists(left) and os.path.exists(right)):
             self._update_size_estimate()
             self._apply_dur_check(None, None)
             return
 
         def work():
-            stats = probe_source_stats(p)
-            ld = rd = None
-            if left and os.path.exists(left):
-                s = probe_source_stats(left)
-                ld = s[0] if s else None
-            if right and os.path.exists(right):
-                s = probe_source_stats(right)
-                rd = s[0] if s else None
-            self.bridge.src_stats.emit(stats)
-            self.bridge.dur_check.emit(ld, rd)
+            res = {}
+
+            def probe_dur(k, p):
+                try:
+                    r = run_hidden([FFPROBE, "-v", "error", "-show_entries",
+                                    "format=duration", "-of",
+                                    "default=nw=1:nk=1", p])
+                    res[k] = float((r.stdout or "0").strip() or 0)
+                except Exception:
+                    res[k] = 0.0
+
+            def probe_stats(p):
+                res["stats"] = probe_source_stats(p)
+
+            ts = [threading.Thread(target=probe_dur, args=("l", left)),
+                  threading.Thread(target=probe_dur, args=("r", right)),
+                  threading.Thread(target=probe_stats, args=(left,))]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            self.bridge.src_stats.emit(res.get("stats"))
+            self.bridge.dur_check.emit(res.get("l") or None, res.get("r") or None)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2006,7 +2031,10 @@ class MainWindow(QWidget):
         base = "border-radius: 9px; padding: 3px 12px; font-weight: 600;"
         if not ld or not rd:
             self.lbl_dur_check.setText("")
-            self.lbl_dur_check.setStyleSheet("padding: 3px 12px;")
+            self.lbl_dur_check.setStyleSheet("background: transparent;")
+            self.lbl_dur_check.setVisible(False)
+            self._dur_ready = False
+            self._update_start_enabled()
             return
         diff = abs(ld - rd)
         if diff <= 1.0:
@@ -2019,6 +2047,15 @@ class MainWindow(QWidget):
                 % (fmt_time(ld), fmt_time(rd), fmt_time(diff)))
             self.lbl_dur_check.setStyleSheet(
                 "color: %s; background: %s; %s" % (c["warn"], c["warn_bg"], base))
+        self.lbl_dur_check.setVisible(True)
+        self._dur_ready = True
+        self._update_start_enabled()
+
+    def _update_start_enabled(self):
+        """时长校验完成前禁用开始按钮（转换运行中不干预）"""
+        if (self.job and self.job.is_alive()) or self._concat_running:
+            return
+        self.btn_start.setEnabled(bool(getattr(self, "_dur_ready", False)))
 
     def _apply_src_stats(self, stats):
         if stats:
@@ -2251,6 +2288,7 @@ class MainWindow(QWidget):
         self.btn_start.setText("开始转换")
         self.btn_start.setObjectName("accent")
         self._repolish(self.btn_start)
+        self._update_start_enabled()
 
     def _start_or_pause(self):
         """开始 / 暂停 / 继续 三态按钮"""
