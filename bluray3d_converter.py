@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.3.0"
+APP_VERSION = "v2.3.1"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -305,7 +305,8 @@ if getattr(sys, "frozen", False):
 
     _BIN_BASE = _find_bin_base()
 else:
-    _BIN_BASE = _CFG_BASE = _ICO_BASE = os.path.dirname(os.path.abspath(__file__))
+    _EXE_DIR = os.path.dirname(os.path.abspath(__file__))
+    _BIN_BASE = _CFG_BASE = _ICO_BASE = _EXE_DIR
 BIN_DIR = os.path.join(_BIN_BASE, "bin")
 FFMPEG_DIR = os.path.join(BIN_DIR, "ffmpeg")
 FFMPEG = os.path.join(FFMPEG_DIR, "master", "ffmpeg.exe")
@@ -2256,6 +2257,23 @@ class MainWindow(QWidget):
         else:
             self.start()
 
+    def _save_log(self, tag=""):
+        """把日志窗口全部内容保存到软件目录 log/ 文件夹（返回路径或 None）"""
+        try:
+            logdir = os.path.join(_EXE_DIR, "log")
+            os.makedirs(logdir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            base = os.path.splitext(os.path.basename(self.le_out.text().strip()))[0]
+            base = re.sub(r'[\\/:*?"<>|]', "_", base) or "转换"
+            path = os.path.join(logdir, "%s_%s%s.log" % (base, ts, tag))
+            self._log("日志已保存：%s" % path)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.log.toPlainText())
+            return path
+        except Exception as e:
+            self._log("日志保存失败：" + str(e))
+            return None
+
     def _done(self, out, stats):
         self._reset_start_btn()
         self.btn_cancel.setEnabled(False)
@@ -2280,6 +2298,10 @@ class MainWindow(QWidget):
             else:
                 lines.append("  中间文件：%s（保留在 %s）" % (
                     fmt_size(st.get("work_size")), st.get("workdir") or ""))
+        log_path = self._save_log()
+        if log_path:
+            lines.append("")
+            lines.append("日志已保存：" + log_path)
         QMessageBox.information(self, APP_TITLE, "\n".join(lines))
 
     def _fail(self, err):
@@ -2291,7 +2313,10 @@ class MainWindow(QWidget):
         self.btn_concat_run.setText("开始拼接")
         self.lbl_stage.setText("失败")
         if err != "已取消":
-            QMessageBox.critical(self, APP_TITLE, "任务失败：\n" + err)
+            p = self._save_log("_失败")
+            QMessageBox.critical(self, APP_TITLE,
+                                 "任务失败：\n" + err
+                                 + (("\n\n日志已保存：\n" + p) if p else ""))
 
     def _source_total_bytes(self):
         total = 0
@@ -2663,7 +2688,10 @@ class MainWindow(QWidget):
         self.btn_concat_run.setText("开始拼接")
         self.btn_cancel.setEnabled(False)
         self.lbl_stage.setText("拼接完成")
-        QMessageBox.information(self, APP_TITLE, "无损拼接完成！\n\n" + out)
+        log_path = self._save_log("_拼接")
+        QMessageBox.information(self, APP_TITLE,
+                                "无损拼接完成！\n\n" + out
+                                + (("\n\n日志已保存：\n" + log_path) if log_path else ""))
         if self.chk_open.isChecked():
             try:
                 os.startfile(os.path.dirname(os.path.abspath(out)))

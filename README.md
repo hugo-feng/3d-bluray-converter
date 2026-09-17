@@ -9,7 +9,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.3.0/3DBlurayConverter_v2.3.0_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.3.1/3DBlurayConverter_v2.3.1_portable.zip
 
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 
@@ -41,6 +41,12 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.3.0/3DBlur
 - **大小预估**：选择左右眼后实时预估成品大小；拼接时实时显示全片预计大小
 - **进度与倒计时**：解流 / 编码 / 音频 / 混流各阶段实时进度、帧率与剩余时间；
   长时间无输出时自动提示"仍在运行"（大文件写盘 / 解码器初始化较慢时不再像卡死）
+- **左右眼时长校验**：选择左右眼后自动比对时长——一致显示绿色圆弧标签，
+  不一致红色警示并提示检查配对（防右眼黑块 / 拖影）
+- **完成统计与日志**：转换完成后弹窗展示各阶段耗时与源文件 / 成品 / 中间文件大小；
+  完整日志自动保存到软件目录 `log\` 文件夹
+- **暂停 / 断点续转**：转换中可随时暂停（挂起当前阶段）与继续，进度不丢失；
+  取消需二次确认（会删除全部中间进度）
 - **失败续跑**：任务中间文件集中在专属文件夹（`_bd3d_work_*`）；
   失败 / 取消时保留，重跑自动复用已完成的编码（跳过视频编码，直接重做音频与混流）；
   转换成功后自动清理该文件夹
