@@ -28,14 +28,16 @@ import subprocess
 
 from PySide6.QtCore import (Qt, QObject, Signal, QTimer, QRectF, QSize,
                             QPropertyAnimation, QEasingCurve, QAbstractAnimation)
-from PySide6.QtGui import QIcon, QFont, QPainter, QPainterPath, QColor
+from PySide6.QtGui import (QIcon, QFont, QPainter, QPainterPath, QColor, QPen,
+                           QPalette)
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QProgressBar, QLabel, QComboBox, QCheckBox, QPlainTextEdit, QFrame, QStyle,
-    QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
+    QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox,
+    QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.4.2"
+APP_VERSION = "v2.5.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -244,7 +246,7 @@ def probe_duration(path):
     """读取媒体时长（秒）：优先 tsMuxeR 读头探测（对纯 MVC 从属流也是秒级），
     失败时回退 ffprobe。失败返回 0.0"""
     try:
-        r = run_hidden([TSMUXER, path])
+        r = run_hidden([TSMUXER, path], timeout=25)
         out = (r.stdout or "") + (r.stderr or "")
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out)
         if m:
@@ -254,7 +256,8 @@ def probe_duration(path):
         pass
     try:
         r = run_hidden([FFPROBE, "-v", "error", "-show_entries",
-                        "format=duration", "-of", "default=nw=1:nk=1", path])
+                        "format=duration", "-of", "default=nw=1:nk=1", path],
+                       timeout=90)
         return float((r.stdout or "0").strip() or 0)
     except Exception:
         return 0.0
@@ -276,7 +279,7 @@ AUDIO_KBPS_EST = {
 def probe_source_stats(path):
     """读取源统计数据（tsMuxeR 单次读头，秒级）：(时长秒, 帧率, 音轨总码率 kbps)"""
     try:
-        r = run_hidden([TSMUXER, path])
+        r = run_hidden([TSMUXER, path], timeout=25)
         out = (r.stdout or "") + (r.stderr or "")
         dur = 0.0
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out)
@@ -301,7 +304,7 @@ def probe_source_stats(path):
     try:
         r = run_hidden([FFPROBE, "-v", "error", "-show_entries",
                         "stream=codec_type,r_frame_rate,bit_rate:format=duration",
-                        "-of", "default=nw=1", path])
+                        "-of", "default=nw=1", path], timeout=90)
         if r.returncode != 0:
             return None
         dur, fps, a_kbps = 0.0, 0.0, 0.0
@@ -397,6 +400,7 @@ THEMES = {
         disabled_bg="#24262c",
         danger="#c62828", danger_h="#d33b3b", danger_p="#a51f1f",
         hover="#26272e", chk_border="#3d4149",
+        scroll_bg="#17181c", scroll_handle="#3d4149", scroll_handle_h="#5a5e69",
         chk_bg="#2a2b31", ok="#7ee08a", ok_bg="rgba(76,175,80,46)",
         warn="#ff8a8a", warn_bg="rgba(211,47,47,51)",
         chev_right="chevron-right.svg", chev_down="chevron-down.svg",
@@ -408,6 +412,7 @@ THEMES = {
         disabled_bg="#eeeeee",
         danger="#c62828", danger_h="#d33b3b", danger_p="#a51f1f",
         hover="#ededed", chk_border="#c0c0c0",
+        scroll_bg="#ffffff", scroll_handle="#c9c9cf", scroll_handle_h="#a6a6ae",
         chk_bg="#e7e7ea", ok="#1e7e34", ok_bg="#e6f4ea",
         warn="#c62828", warn_bg="#fdecea",
         chev_right="chevron-right-light.svg", chev_down="chevron-down-light.svg",
@@ -461,8 +466,6 @@ QPushButton#danger { background: @DANGER@; color: #ffffff; border: none;
 QPushButton#danger:hover { background: @DANGER_H@; }
 QPushButton#danger:pressed { background: @DANGER_P@; }
 QPushButton#danger:disabled { background: @DISABLED_BG@; color: @DISABLED_FG@; }
-QProgressBar { background: @BORDER@; border: none; border-radius: 4px; }
-QProgressBar::chunk { background: @ACCENT@; border-radius: 4px; }
 QCheckBox { color: @DIM@; spacing: 8px; }
 QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px;
                        border: 1px solid @CHK_BORDER@; background: @CHK_BG@; }
@@ -476,11 +479,20 @@ QLabel#warnlabel { color: @WARN@; background: @WARN_BG@; border-radius: 9px;
 QLabel#plainlabel { color: transparent; background: transparent; padding: 3px 12px; }
 QPlainTextEdit { background: #101114; border: 1px solid #2e3038; border-radius: 6px;
                  color: #ccced6; padding: 6px; }
-QScrollBar:vertical { background: @BG@; width: 12px; margin: 0; }
-QScrollBar::handle:vertical { background: @DIM@; border-radius: 6px; min-height: 36px; }
-QScrollBar::handle:vertical:hover { background: @TEXT@; }
+QDialog { background: @BG@; }
+QMessageBox { background: @CARD@; }
+QMessageBox QLabel { color: @TEXT@; background: transparent; }
+QMessageBox QPushButton { min-width: 72px; }
+QScrollBar:vertical { background: @SCROLL_BG@; width: 12px; margin: 0; }
+QScrollBar::handle:vertical { background: @SCROLL_HANDLE@; border-radius: 6px; min-height: 36px; }
+QScrollBar::handle:vertical:hover { background: @SCROLL_HANDLE_H@; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+QScrollBar:horizontal { background: @SCROLL_BG@; height: 12px; margin: 0; }
+QScrollBar::handle:horizontal { background: @SCROLL_HANDLE@; border-radius: 6px; min-width: 36px; }
+QScrollBar::handle:horizontal:hover { background: @SCROLL_HANDLE_H@; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
 """
 
 
@@ -494,6 +506,59 @@ def build_qss(theme, icons_dir):
     return qss
 
 
+def make_msgbox(parent, icon, text, buttons, default_button=None):
+    """主题化弹窗：控件级样式 + 调色板双保险。
+
+    注意：应用级全局 QSS 对顶层 QMessageBox 的背景不生效（实测），
+    因此必须用控件级 setStyleSheet + palette 才能保证浅色主题下文字可见。
+    """
+    mb = QMessageBox(parent)
+    mb.setIcon(icon)
+    mb.setWindowTitle(APP_TITLE)
+    mb.setText(text)
+    mb.setStandardButtons(buttons)
+    if default_button is not None:
+        mb.setDefaultButton(default_button)
+    c = THEMES.get(_ACTIVE.get("theme", "dark"), THEMES["dark"])
+    mb.setStyleSheet(
+        "QMessageBox { background: %(card)s; }"
+        "QMessageBox QLabel { color: %(text)s; background: transparent; }"
+        "QMessageBox QPushButton { background: %(btn)s; color: %(text)s;"
+        " border: 1px solid %(border)s; border-radius: 6px; min-width: 72px;"
+        " padding: 6px 14px; }"
+        "QMessageBox QPushButton:hover { background: %(btnh)s; }"
+        % {"card": c["card"], "text": c["text"], "btn": c["btn"],
+           "border": c["border"], "btnh": c["btn_h"]})
+    mb.setAutoFillBackground(True)
+    pal = mb.palette()
+    pal.setColor(QPalette.Window, QColor(c["card"]))
+    pal.setColor(QPalette.WindowText, QColor(c["text"]))
+    pal.setColor(QPalette.Base, QColor(c["card"]))
+    pal.setColor(QPalette.Text, QColor(c["text"]))
+    mb.setPalette(pal)
+    return mb
+
+
+def msg_info(parent, text):
+    make_msgbox(parent, QMessageBox.Information, text, QMessageBox.Ok).exec()
+
+
+def msg_warn(parent, text):
+    make_msgbox(parent, QMessageBox.Warning, text, QMessageBox.Ok).exec()
+
+
+def msg_err(parent, text):
+    make_msgbox(parent, QMessageBox.Critical, text, QMessageBox.Ok).exec()
+
+
+def msg_confirm(parent, text, default_yes=True):
+    r = make_msgbox(
+        parent, QMessageBox.Question, text,
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.Yes if default_yes else QMessageBox.No).exec()
+    return r == QMessageBox.Yes
+
+
 class Cancelled(Exception):
     pass
 
@@ -505,10 +570,10 @@ def popen_hidden(cmd):
         encoding="utf-8", errors="replace", bufsize=1)
 
 
-def run_hidden(cmd):
+def run_hidden(cmd, timeout=None):
     return subprocess.run(
         cmd, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", creationflags=CREATE_NO_WINDOW)
+        errors="replace", creationflags=CREATE_NO_WINDOW, timeout=timeout)
 
 
 def fmt_time(seconds):
@@ -875,6 +940,7 @@ class ConvertJob(threading.Thread):
         tail = []
         last_chk = -1
         cur_pct = 0.0
+        t_dmux0 = time.time()
         wd = self._start_watchdog("tsMuxeR 解流")
         for line in p.stdout:
             wd["t"] = time.time()
@@ -886,13 +952,20 @@ class ConvertJob(threading.Thread):
             if len(tail) > 15:
                 del tail[0]
             if "flushing" in line.lower() or "write buffer" in line.lower():
-                self.on_progress("demux", cur_pct,
+                self.on_progress("demux", DEMUX_WEIGHT * cur_pct / 100.0,
                                  "正在写入磁盘缓存（数据量较大，请稍候）...")
             m = re.search(r"([\d.]+)% complete", line)
             if m:
                 pct = float(m.group(1))
                 cur_pct = pct
-                self.on_progress("demux", pct, "解流中")
+                el = time.time() - t_dmux0
+                if pct >= 1.0 and el > 3:
+                    remain = el * (100.0 - pct) / pct
+                    info = "解流中 %.0f%% · 本阶段剩余约 %s" % (
+                        pct, fmt_time(remain))
+                else:
+                    info = "解流中 %.0f%%" % pct
+                self.on_progress("demux", DEMUX_WEIGHT * pct / 100.0, info)
                 if int(pct) % 5 == 0 and int(pct) != last_chk:
                     last_chk = int(pct)
                     try:
@@ -1062,7 +1135,7 @@ class ConvertJob(threading.Thread):
                     speed = cur / max(time.time() - t0, 0.001)
                     remain = (total - cur) / speed if speed > 0.01 else 0
                     pct = DEMUX_WEIGHT + (cur / max(total, 1)) * VIDEO_WEIGHT
-                    info = "%d/%d 帧 · %.0f fps · 剩余约 %s" % (
+                    info = "%d/%d 帧 · %.0f fps · 本阶段剩余约 %s" % (
                         cur, total, speed, fmt_time(remain))
                     self.on_progress("encode", pct, info)
                 elif line.startswith("progress=") and line.endswith("end"):
@@ -1122,7 +1195,7 @@ class ConvertJob(threading.Thread):
                     pct = base_pct + (ai + frac) / len(extract_jobs) * AUDIO_WEIGHT
                     self.on_progress(
                         "audio", pct,
-                        "音频提取 %d/%d · %.0f%% · 剩余约 %s" % (
+                        "音频提取 %d/%d · %.0f%% · 本阶段剩余约 %s" % (
                             ai + 1, len(extract_jobs), frac * 100,
                             fmt_time(remain)))
                 elif line.startswith("progress=") and line.endswith("end"):
@@ -1176,7 +1249,7 @@ class ConvertJob(threading.Thread):
                 remain = (dur - sec) / speed if speed > 0.01 else 0
                 pct = base_pct + frac * MUX_WEIGHT
                 self.on_progress(
-                    "mux", pct, "混流封装中 %.0f%% · 剩余约 %s" % (
+                    "mux", pct, "混流封装中 %.0f%% · 本阶段剩余约 %s" % (
                         frac * 100, fmt_time(remain)))
             elif line.startswith("progress=") and line.endswith("end"):
                 break
@@ -1389,6 +1462,51 @@ class Bridge(QObject):
     right_match = Signal(object)
     tracks = Signal(object)
     gpu_info = Signal(object)
+
+
+class SlimProgress(QWidget):
+    """自绘细进度条（8px 高）：颜色由主题参数直接决定，
+    不依赖 Fusion 调色板与窗口激活状态，避免窗口失焦时变色 / 消失。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._val = 0
+        self._theme = "dark"
+        self.setFixedHeight(8)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def setValue(self, v):
+        v = max(0, min(int(v), 1000))
+        if v != self._val:
+            self._val = v
+            self.update()
+
+    def value(self):
+        return self._val
+
+    def set_theme(self, theme):
+        self._theme = theme
+        self.update()
+
+    def paintEvent(self, _event):
+        c = THEMES.get(self._theme, THEMES["dark"])
+        if self._theme == "light":
+            groove, edge = "#ffffff", "#d9d9de"
+        else:
+            groove, edge = "#26272e", "#3a3c44"
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = r.height() / 2.0
+        p.setPen(QPen(QColor(edge), 1))
+        p.setBrush(QColor(groove))
+        p.drawRoundedRect(r, radius, radius)
+        if self._val > 0:
+            w = r.width() * self._val / 1000.0
+            chunk = QRectF(r.left(), r.top(), max(w, r.height()), r.height())
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(c["accent"]))
+            p.drawRoundedRect(chunk, radius, radius)
 
 
 class SmoothScrollArea(QScrollArea):
@@ -1847,15 +1965,18 @@ class MainWindow(QWidget):
         r.addWidget(self.lbl_stage)
         r.addStretch(1)
         cv.addLayout(r)
-        self.pb = QProgressBar()
-        self.pb.setRange(0, 1000)
-        self.pb.setValue(0)
-        self.pb.setFixedHeight(8)
-        self.pb.setTextVisible(False)
+        self.pb = SlimProgress()
         cv.addWidget(self.pb)
+        hr = QHBoxLayout()
+        hr.setContentsMargins(0, 0, 0, 0)
         self.lbl_stat = QLabel(" ")
         self.lbl_stat.setObjectName("faintlabel")
-        cv.addWidget(self.lbl_stat)
+        hr.addWidget(self.lbl_stat)
+        hr.addStretch(1)
+        self.lbl_eta = QLabel("")
+        self.lbl_eta.setObjectName("faintlabel")
+        hr.addWidget(self.lbl_eta)
+        cv.addLayout(hr)
         root.addWidget(card)
 
         # ---------- 日志 ----------
@@ -1977,8 +2098,44 @@ class MainWindow(QWidget):
                 item["rm"].setIcon(QIcon(pm))
                 item["rm"].setIconSize(pm.size())
         self._apply_checkbox_qss()
+        if getattr(self, "pb", None) is not None:
+            self.pb.set_theme(self._theme)
+            self._apply_scrollbars()
         if getattr(self, "_dur_pair", (None, None)) != (None, None):
             self._apply_dur_check(*self._dur_pair)
+
+    def _apply_scrollbars(self):
+        """滚动条控件级样式：跟随主题（Windows Fusion 下全局规则可靠性不足）"""
+        c = THEMES.get(self._theme, THEMES["dark"])
+
+        def sb_qss(bg, handle, handle_h, w):
+            return (
+                "QScrollBar:vertical { background: %(bg)s; width: %(w)dpx; margin: 0; }"
+                "QScrollBar::handle:vertical { background: %(h)s; border-radius: %(r)dpx;"
+                " min-height: 36px; }"
+                "QScrollBar::handle:vertical:hover { background: %(hh)s; }"
+                "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+                "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical"
+                " { background: none; }"
+                "QScrollBar:horizontal { background: %(bg)s; height: %(w)dpx; margin: 0; }"
+                "QScrollBar::handle:horizontal { background: %(h)s;"
+                " border-radius: %(r)dpx; min-width: 36px; }"
+                "QScrollBar::handle:horizontal:hover { background: %(hh)s; }"
+                "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal"
+                " { width: 0; }"
+                "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal"
+                " { background: none; }"
+                % {"bg": bg, "h": handle, "hh": handle_h, "w": w, "r": w // 2})
+
+        themed = sb_qss(c["scroll_bg"], c["scroll_handle"],
+                        c["scroll_handle_h"], 12)
+        for sa in self.findChildren(QAbstractScrollArea):
+            sa.verticalScrollBar().setStyleSheet(themed)
+            sa.horizontalScrollBar().setStyleSheet(themed)
+        log = getattr(self, "log", None)
+        if log is not None:
+            log.verticalScrollBar().setStyleSheet(
+                sb_qss("#1b1c20", "#3d4149", "#5a5e69", 12))
 
     def _apply_checkbox_qss(self):
         """复选框样式：勾选＝蓝底+√；未勾选＝灰底+无√（控件级样式，主题联动）"""
@@ -2315,7 +2472,15 @@ class MainWindow(QWidget):
             self._log("已自动配对左眼文件：%s" % target)
 
     def _auto_match_right(self, left_path):
-        """扫描左眼所在目录的同格式文件，按「文件名相邻优先 + 时长一致」自动匹配右眼"""
+        """扫描左眼所在目录自动匹配右眼。
+
+        右眼流编号不一定与左眼相邻（例如左眼 00098、右眼 00109），
+        因此不能按文件名距离截断候选；改为：
+          1. 过滤 0 字节 / 微小文件（菜单、花絮）；
+          2. 按「文件大小与左眼接近」排序（左右眼同为 GB 级正片流）；
+          3. 逐个用 tsMuxeR 读头核对时长（0.1~0.4 秒/个），命中即停，最多 24 个；
+          4. 全过程写入日志，便于确认匹配依据。
+        """
         def work():
             d = os.path.dirname(left_path)
             ext = os.path.splitext(left_path)[1].lower()
@@ -2324,31 +2489,57 @@ class MainWindow(QWidget):
                 self.bridge.right_match.emit((left_path, None))
                 return
             try:
-                cands = [os.path.join(d, f) for f in os.listdir(d)
+                left_size = os.path.getsize(left_path)
+            except OSError:
+                left_size = 0
+            try:
+                names = [f for f in os.listdir(d)
                          if f.lower().endswith(ext)
                          and os.path.normcase(os.path.join(d, f))
                          != os.path.normcase(left_path)]
             except OSError:
                 self.bridge.right_match.emit((left_path, None))
                 return
-            if not cands:
+            if not names:
                 self.bridge.right_match.emit((left_path, None))
                 return
-            lnum = _name_number(os.path.basename(left_path))
-            if lnum is not None:
-                def rank(p):
-                    n = _name_number(os.path.basename(p))
-                    return abs(n - lnum) if n is not None else 10 ** 9
-                cands.sort(key=rank)
-            self.bridge.log.emit("正在自动匹配右眼（核对候选文件时长）...")
+            cands = []
+            for f in names:
+                p = os.path.join(d, f)
+                try:
+                    sz = os.path.getsize(p)
+                except OSError:
+                    continue
+                if sz >= 64 * 1024 * 1024:
+                    cands.append((p, sz))
+            if not cands:
+                for f in names:
+                    p = os.path.join(d, f)
+                    try:
+                        if os.path.getsize(p) > 0:
+                            cands.append((p, os.path.getsize(p)))
+                    except OSError:
+                        pass
+            cands.sort(key=lambda it: abs(it[1] - left_size))
+            self.bridge.log.emit(
+                "正在自动匹配右眼（核对 %d 个候选文件的时长）..." % len(cands))
             best = None
-            for i, p in enumerate(cands):
-                if i >= 8:
+            for i, (p, sz) in enumerate(cands):
+                if i >= 24:
                     break
                 dur = probe_duration(p)
-                if dur > 0 and abs(dur - left_dur) <= 1.0:
+                nm = os.path.basename(p)
+                if dur <= 0:
+                    self.bridge.log.emit("  候选 %s：无法读取时长（跳过）" % nm)
+                    continue
+                if abs(dur - left_dur) <= 1.0:
                     best = p
+                    self.bridge.log.emit(
+                        "  候选 %s：时长 %s（与左眼一致）" % (nm, fmt_time(dur)))
                     break
+                self.bridge.log.emit(
+                    "  候选 %s：时长 %s（与左眼相差 %s，不符合）"
+                    % (nm, fmt_time(dur), fmt_time(abs(dur - left_dur))))
             self.bridge.right_match.emit((left_path, best))
 
         threading.Thread(target=work, daemon=True).start()
@@ -2390,11 +2581,30 @@ class MainWindow(QWidget):
         if name:
             self.lbl_stage.setText(name)
         self.lbl_stat.setText(info)
+        self._update_total_eta(pct)
+
+    def _update_total_eta(self, pct):
+        """总剩余时长（覆盖解流/编码/音频/混流全部阶段）：
+        用任务已耗时按整体完成百分比外推，随进度自动校准。"""
+        t0 = getattr(self, "_job_t0", None)
+        if t0 is None:
+            self.lbl_eta.setText("")
+            return
+        if pct >= 99.9:
+            self.lbl_eta.setText("")
+            return
+        elapsed = time.time() - t0
+        if pct < 2.0 or elapsed < 5.0:
+            self.lbl_eta.setText("总剩余：计算中...")
+            return
+        total = elapsed / (pct / 100.0)
+        self.lbl_eta.setText("总剩余约 %s" % fmt_time(max(total - elapsed, 0.0)))
 
     def _concat_progress(self, pct, info):
         self.pb.setValue(int(max(0.0, min(pct, 100.0)) * 10))
         self.lbl_pct.setText("%.1f%%" % pct)
         self.lbl_stat.setText(info)
+        self._update_total_eta(pct)
 
     def _repolish(self, w):
         w.style().unpolish(w)
@@ -2405,6 +2615,8 @@ class MainWindow(QWidget):
         self.btn_start.setText("开始转换")
         self.btn_start.setObjectName("accent")
         self._repolish(self.btn_start)
+        self._job_t0 = None
+        self.lbl_eta.setText("")
         self._update_start_enabled()
 
     def _start_or_pause(self):
@@ -2422,6 +2634,7 @@ class MainWindow(QWidget):
                     self.btn_start.setObjectName("accent")
                     self._repolish(self.btn_start)
                     self.lbl_stage.setText("已暂停")
+                    self.lbl_eta.setText("已暂停")
                 else:
                     self._log("当前阶段无法暂停（可能在阶段切换中），请稍后再试")
         else:
@@ -2472,7 +2685,7 @@ class MainWindow(QWidget):
         if log_path:
             lines.append("")
             lines.append("日志已保存：" + log_path)
-        QMessageBox.information(self, APP_TITLE, "\n".join(lines))
+        msg_info(self, "\n".join(lines))
 
     def _fail(self, err):
         self._reset_start_btn()
@@ -2485,9 +2698,8 @@ class MainWindow(QWidget):
         if err != "已取消":
             self._log("错误：" + err)
             p = self._save_log("_失败")
-            QMessageBox.critical(self, APP_TITLE,
-                                 "任务失败：\n" + err
-                                 + (("\n\n日志已保存：\n" + p) if p else ""))
+            msg_err(self, "任务失败：\n" + err
+                    + (("\n\n日志已保存：\n" + p) if p else ""))
 
     def _source_total_bytes(self):
         total = 0
@@ -2526,8 +2738,8 @@ class MainWindow(QWidget):
         est_out = self._estimated_output_mb() * 1024 * 1024
         src_total = self._source_total_bytes()
         if est_out > 0 and free < est_out * 1.1:
-            QMessageBox.critical(
-                self, APP_TITLE,
+            msg_err(
+                self,
                 "输出磁盘剩余空间不足，无法开始：\n\n"
                 "剩余：%.1f GB\n成品预计就需要：约 %.1f GB\n\n"
                 "请清理空间或更换输出位置后重试。"
@@ -2535,8 +2747,8 @@ class MainWindow(QWidget):
             return False
         need = src_total + est_out + 3 * 1024 ** 3
         if need > 0 and free < need:
-            r = QMessageBox.question(
-                self, APP_TITLE,
+            return msg_confirm(
+                self,
                 "输出磁盘空间可能不足：\n\n"
                 "剩余：%.1f GB\n"
                 "预计需要：解流中间文件约 %.1f GB + 成品约 %.1f GB（共约 %.1f GB）\n\n"
@@ -2544,36 +2756,90 @@ class MainWindow(QWidget):
                 "是否仍要继续？" % (
                     free_gb, src_total / 1024.0 ** 3, est_out / 1024.0 ** 3,
                     (src_total + est_out) / 1024.0 ** 3),
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            return r == QMessageBox.Yes
+                default_yes=False)
+        return True
+
+    def _estimate_stage_times(self):
+        """粗估各阶段耗时（秒）→ [(阶段名, 秒), ...]（按本机经验速度，仅供确认弹窗参考）
+
+        不在此处同步探测时长（避免 UI 阻塞）；源时长尚未探测完成时，
+        编码/音频/混流阶段暂不计入，实际执行不受影响。
+        """
+        dur = self._src_dur if self._src_dur > 0 else 0.0
+        fps = self._src_fps if self._src_fps > 1.0 else 23.976
+        src_bytes = self._source_total_bytes()
+        enc = self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf")
+        speed = self._sel(SPEEDS, self.cmb_speed.currentText(), "quality")
+        audio_mode = self._sel(AUDIO_MODES, self.cmb_audio.currentText(), "dual")
+        enc_fps = {"amf": 32.0, "nvenc": 32.0, "qsv": 12.0, "cpu": 2.5}.get(enc, 30.0)
+        enc_fps *= {"quality": 1.0, "balanced": 1.5, "speed": 2.2}.get(speed, 1.0)
+        reuse = (getattr(self, "chk_reuse", None) is not None
+                 and self.chk_reuse.isChecked())
+        stages = []
+        if src_bytes > 0:
+            stages.append(("解流（分离左右眼视频流）", src_bytes / (250.0 * 1024 ** 2)))
+        if dur > 0:
+            nm = "编码（合并 SBS 并重新编码）"
+            if reuse:
+                nm = "编码（勾选了复用：已有编码结果则跳过）"
+            stages.append((nm, dur * fps / max(enc_fps, 0.1)))
+        if dur > 0 and audio_mode != "none":
+            stages.append(("提取音频", dur / 12.0))
+            stages.append(("混流封装",
+                           max(self._estimated_output_mb(), 100.0) / 120.0))
+        return stages
+
+    def _confirm_start(self, left, right, out):
+        """开始前确认：列出总阶段数与各阶段预估时间（可取消，不做任何改动）"""
+        stages = self._estimate_stage_times()
+        if not stages:
+            return True
+        lines = ["即将开始 3D 转换，共 %d 个阶段：" % len(stages), ""]
+        total = 0.0
+        for i, (nm, sec) in enumerate(stages, 1):
+            total += sec
+            lines.append("  %d/%d  %s" % (i, len(stages), nm))
+            lines.append("        预计约 %s" % fmt_time(sec))
+        lines += ["",
+                  "合计预计：约 %s（按本机配置粗估，实际用时可能有差异）"
+                  % fmt_time(total),
+                  "",
+                  "是否开始？"]
+        if self._src_dur <= 0:
+            lines.insert(1, "（源时长仍在探测中，编码/音频阶段耗时暂未计入）")
+            lines.insert(2, "")
+        if not msg_confirm(self, "\n".join(lines)):
+            self._log("已取消本次开始（未执行任何操作）。")
+            return False
         return True
 
     def start(self):
         if self.job and self.job.is_alive():
             return
         if self._concat_running:
-            QMessageBox.information(self, APP_TITLE, "拼接任务进行中，请等待完成后再开始转换")
+            msg_info(self, "拼接任务进行中，请等待完成后再开始转换")
             return
         left = self.le_left.text().strip()
         right = self.le_right.text().strip()
         out = self.le_out.text().strip()
         if not left or not os.path.exists(left):
-            QMessageBox.critical(self, APP_TITLE, "请选择有效的左眼视频流文件（.m2ts）")
+            msg_err(self, "请选择有效的左眼视频流文件（.m2ts）")
             return
         if not right or not os.path.exists(right):
-            QMessageBox.critical(self, APP_TITLE, "请选择有效的右眼视频流文件（.m2ts）")
+            msg_err(self, "请选择有效的右眼视频流文件（.m2ts）")
             return
         if not out:
-            QMessageBox.critical(self, APP_TITLE, "请选择输出文件路径")
+            msg_err(self, "请选择输出文件路径")
             return
         out_dir = os.path.dirname(os.path.abspath(out))
         try:
             os.makedirs(out_dir, exist_ok=True)
         except Exception as e:
-            QMessageBox.critical(self, APP_TITLE,
-                                 "输出目录无法创建：\n%s\n\n%s" % (out_dir, e))
+            msg_err(self, "输出目录无法创建：\n%s\n\n%s" % (out_dir, e))
             return
         if not self._check_disk_space(out):
+            return
+        if not self._confirm_start(left, right, out):
             return
         container = self._sel(CONTAINERS, self.cmb_container.currentText(), "mkv")
         if container == "mp4" and not out.lower().endswith(".mp4"):
@@ -2619,8 +2885,8 @@ class MainWindow(QWidget):
         if not ok:
             self._log("编码器预检失败（%s / FFmpeg %s）：%s" % (
                 self.cmb_encoder.currentText(), eff_ver, emsg))
-            QMessageBox.critical(
-                self, APP_TITLE,
+            msg_err(
+                self,
                 "所选编码器在本机不可用：\n\n%s\n\n%s\n\n"
                 "处理建议：\n"
                 "  · NVIDIA 驱动版本不满足时，到「高级 → FFmpeg 版本」切换兼容版 8.0\n"
@@ -2682,15 +2948,15 @@ class MainWindow(QWidget):
             on_progress=lambda st, pct, info: self.bridge.progress.emit(st, pct, info),
             on_done=lambda o, st: self.bridge.done.emit(o, st),
             on_error=lambda e: self.bridge.error.emit(e))
+        self._job_t0 = time.time()
         self.job.start()
 
     def cancel(self):
         if self._concat_running:
-            r = QMessageBox.warning(
-                self, APP_TITLE,
-                "确定要取消拼接吗？\n\n已写入的临时文件会被清理，需要重新开始。",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if r != QMessageBox.Yes:
+            if not msg_confirm(
+                    self,
+                    "确定要取消拼接吗？\n\n已写入的临时文件会被清理，需要重新开始。",
+                    default_yes=False):
                 return
             self._log("正在取消拼接...")
             for proc in self._concat_procs:
@@ -2700,15 +2966,14 @@ class MainWindow(QWidget):
                     pass
             return
         if self.job:
-            r = QMessageBox.warning(
-                self, APP_TITLE,
-                "确定要取消本次转换吗？\n\n"
-                "取消会【删除所有中间文件】——包括已完成的解流、已编码的视频等\n"
-                "全部进行中的进度，之后无法断点续转。\n\n"
-                "若想保留进度稍后继续，请改点「暂停」或直接关闭窗口。\n\n"
-                "确定取消并删除全部进度吗？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if r != QMessageBox.Yes:
+            if not msg_confirm(
+                    self,
+                    "确定要取消本次转换吗？\n\n"
+                    "取消会【删除所有中间文件】——包括已完成的解流、已编码的视频等\n"
+                    "全部进行中的进度，之后无法断点续转。\n\n"
+                    "若想保留进度稍后继续，请改点「暂停」或直接关闭窗口。\n\n"
+                    "确定取消并删除全部进度吗？",
+                    default_yes=False):
                 return
             self._log("正在取消（将删除中间文件）...")
             self.lbl_stage.setText("正在取消")
@@ -2803,24 +3068,24 @@ class MainWindow(QWidget):
         if self._concat_running:
             return
         if self.job and self.job.is_alive():
-            QMessageBox.information(self, APP_TITLE, "转换任务进行中，请等待完成后再拼接")
+            msg_info(self, "转换任务进行中，请等待完成后再拼接")
             return
         segs = [p for p in self._seg_paths() if p]
         if len(segs) < 2:
-            QMessageBox.critical(self, APP_TITLE, "请至少按顺序选择 2 段视频")
+            msg_err(self, "请至少按顺序选择 2 段视频")
             return
         if len(segs) > 16:
-            QMessageBox.critical(self, APP_TITLE, "最多支持 16 段视频")
+            msg_err(self, "最多支持 16 段视频")
             return
         for p in segs:
             if not os.path.exists(p):
-                QMessageBox.critical(self, APP_TITLE, "找不到文件：\n" + p)
+                msg_err(self, "找不到文件：\n" + p)
                 return
         seen = set()
         for p in segs:
             k = os.path.normcase(os.path.abspath(p))
             if k in seen:
-                QMessageBox.critical(self, APP_TITLE, "分段列表存在重复文件：\n" + p)
+                msg_err(self, "分段列表存在重复文件：\n" + p)
                 return
             seen.add(k)
         out = self.le_cat_out.text().strip()
@@ -2841,6 +3106,7 @@ class MainWindow(QWidget):
         self.btn_concat_run.setText("拼接中...")
         self.btn_cancel.setEnabled(True)
         self.lbl_stage.setText("拼接中")
+        self._job_t0 = time.time()
         self._log("========== 无损拼接（%d 段） ==========" % len(segs))
         for i, p in enumerate(segs, 1):
             self._log("第 %d 段：%s" % (i, p))
@@ -2855,14 +3121,15 @@ class MainWindow(QWidget):
     def _concat_done(self, out):
         self._concat_running = False
         self._concat_procs = []
+        self._job_t0 = None
+        self.lbl_eta.setText("")
         self.btn_concat_run.setEnabled(True)
         self.btn_concat_run.setText("开始拼接")
         self.btn_cancel.setEnabled(False)
         self.lbl_stage.setText("拼接完成")
         log_path = self._save_log("_拼接")
-        QMessageBox.information(self, APP_TITLE,
-                                "无损拼接完成！\n\n" + out
-                                + (("\n\n日志已保存：\n" + log_path) if log_path else ""))
+        msg_info(self, "无损拼接完成！\n\n" + out
+                 + (("\n\n日志已保存：\n" + log_path) if log_path else ""))
         if self.chk_open.isChecked():
             try:
                 os.startfile(os.path.dirname(os.path.abspath(out)))
@@ -2871,13 +3138,12 @@ class MainWindow(QWidget):
 
     def closeEvent(self, event):
         if (self.job and self.job.is_alive()) or self._concat_running:
-            r = QMessageBox.question(
-                self, APP_TITLE,
-                "任务仍在进行中，确定要退出吗？\n\n"
-                "退出会终止当前任务，但【保留】中间文件进度——\n"
-                "下次对同一任务点击开始，会自动断点续转。",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if r != QMessageBox.Yes:
+            if not msg_confirm(
+                    self,
+                    "任务仍在进行中，确定要退出吗？\n\n"
+                    "退出会终止当前任务，但【保留】中间文件进度——\n"
+                    "下次对同一任务点击开始，会自动断点续转。",
+                    default_yes=False):
                 event.ignore()
                 return
             for proc in self._concat_procs:
