@@ -14,7 +14,7 @@
 用法（CLI）: python bluray3d_converter.py --cli --left "00000.m2ts" --right "00001.m2ts" --out "x.mkv"
              [--layout full_sbs|half_sbs|full_tab|half_tab]
              [--container mkv|mp4] [--encoder amf|nvenc|qsv|cpu] [--quality 0-3]
-             [--bitrate 20] [--frames N] [--noaudio] [--skipdemux]
+[--bitrate 20] [--frames N] [--noaudio] [--skipdemux] [--reuse]
 """
 import os
 import re
@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.1.0"
+APP_VERSION = "v2.1.1"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -562,6 +562,7 @@ class ConvertJob(threading.Thread):
                  container="mkv", encoder="amf", rc="cqp", qp=18, bitrate=20,
                  speed="quality", gop=96, audio_mode="dual", audio_track=None,
                  open_after=False, max_frames=0, skip_demux=False, ffmpeg=None,
+                 reuse_video=False,
                  on_log=None, on_progress=None, on_done=None, on_error=None):
         super().__init__(daemon=True)
         self.left_file = left_file
@@ -580,6 +581,7 @@ class ConvertJob(threading.Thread):
         self.open_after = open_after
         self.max_frames = max_frames
         self.skip_demux = skip_demux
+        self.reuse_video = reuse_video
         self.on_log = on_log or (lambda s: None)
         self.on_progress = on_progress or (lambda stage, pct, info: None)
         self.on_done = on_done or (lambda out: None)
@@ -645,6 +647,7 @@ class ConvertJob(threading.Thread):
             self._encode(left_es, right_es, nframes, audio_src, audio_idx, audio_codec)
             self._check()
             self._log("完成：" + self.out_file)
+            self._cleanup_workdir()
             self.on_progress("done", 100.0, "全部完成")
             if self.open_after:
                 try:
@@ -654,10 +657,45 @@ class ConvertJob(threading.Thread):
             self.on_done(self.out_file)
         except Cancelled:
             self._log("任务已取消")
+            if self.workdir and os.path.isdir(self.workdir):
+                self._log("中间文件夹已保留：%s（重跑相同任务可复用已完成部分）"
+                          % self.workdir)
             self.on_error("已取消")
         except Exception as e:
             self._log("错误：" + str(e))
+            if self.workdir and os.path.isdir(self.workdir):
+                self._log("中间文件夹已保留：%s（勾选「复用已完成的编码」重跑，"
+                          "可跳过已完成的部分）" % self.workdir)
             self.on_error(str(e))
+
+    # ---------- 任务文件夹管理 ----------
+    def _cleanup_workdir(self):
+        """转换成功：删除本次任务的中间文件夹（失败时保留以便复用已完成部分）"""
+        wd = self.workdir
+        if not wd or not os.path.isdir(wd):
+            return
+        if not os.path.basename(os.path.normpath(wd)).startswith("_bd3d_work_"):
+            return
+        self._log("清理中间文件夹：%s" % wd)
+        try:
+            shutil.rmtree(wd, ignore_errors=True)
+        except Exception:
+            pass
+
+    def _start_watchdog(self, tag):
+        """长时间无输出时周期性提示（避免大文件写盘 / 初始化被误认为卡死）"""
+        holder = {"t": time.time(), "stop": threading.Event()}
+
+        def loop():
+            while not holder["stop"].wait(20):
+                gap = time.time() - holder["t"]
+                if gap > 60:
+                    self._log("…%s 仍在运行（已 %.0f 秒无新输出；大文件写盘 / "
+                              "解码器初始化可能较慢，请耐心等待）" % (tag, gap))
+                    holder["t"] = time.time()
+
+        threading.Thread(target=loop, daemon=True).start()
+        return holder
 
     # ---------- 阶段 1：解流 ----------
     def _demux(self, name):
@@ -676,7 +714,10 @@ class ConvertJob(threading.Thread):
         nframes = 0
         tail = []
         last_chk = -1
+        cur_pct = 0.0
+        wd = self._start_watchdog("tsMuxeR 解流")
         for line in p.stdout:
+            wd["t"] = time.time()
             self._check()
             line = line.strip()
             if not line:
@@ -684,9 +725,13 @@ class ConvertJob(threading.Thread):
             tail.append(line)
             if len(tail) > 15:
                 del tail[0]
+            if "flushing" in line.lower() or "write buffer" in line.lower():
+                self.on_progress("demux", cur_pct,
+                                 "正在写入磁盘缓存（数据量较大，请稍候）...")
             m = re.search(r"([\d.]+)% complete", line)
             if m:
                 pct = float(m.group(1))
+                cur_pct = pct
                 self.on_progress("demux", pct, "解流中")
                 if int(pct) % 5 == 0 and int(pct) != last_chk:
                     last_chk = int(pct)
@@ -707,6 +752,7 @@ class ConvertJob(threading.Thread):
                 nframes = max(nframes, int(m.group(1)))
             if re.search(r"error|Error|错误|Cannot|cannot|space", line):
                 self._log("  tsMuxeR: " + line)
+        wd["stop"].set()
         p.wait()
         self.proc = None
         self._check()
@@ -791,71 +837,82 @@ class ConvertJob(threading.Thread):
         total = nframes
         if self.max_frames:
             total = min(nframes, self.max_frames)
-        avs_path = os.path.join(self.workdir, "decode.avs")
-        with open(avs_path, "w", encoding="utf-8") as f:
-            f.write(self._build_avs(base, dep, nframes, total))
-
-        # ---- 阶段 2A：编码纯视频 ----
+        # ---- 阶段 2A：编码纯视频（可复用上次已完成的编码结果）----
         tmp_video = os.path.join(self.workdir, "video_only.mkv")
-        cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
-               "-i", avs_path, "-an"] + self._video_args()
-        if self.max_frames:
-            cmd += ["-frames:v", str(total)]
-        cmd += ["-f", "matroska", tmp_video]
+        reuse = (self.reuse_video and os.path.exists(tmp_video)
+                 and os.path.getsize(tmp_video) > 50 * 1024 * 1024)
+        if reuse:
+            self._log("复用已完成的编码结果（video_only.mkv，%.1f GB），跳过视频编码阶段"
+                      % (os.path.getsize(tmp_video) / 1024.0 ** 3))
+            self._log("  提示：若修改过布局 / 编码器 / 质量等画面参数，"
+                      "请取消勾选「复用已完成的编码」后重新开始")
+            self.on_progress("encode", DEMUX_WEIGHT + VIDEO_WEIGHT,
+                             "复用已完成的编码结果")
+        else:
+            avs_path = os.path.join(self.workdir, "decode.avs")
+            with open(avs_path, "w", encoding="utf-8") as f:
+                f.write(self._build_avs(base, dep, nframes, total))
 
-        p = popen_hidden(cmd)
-        self.proc = p
-        cur = 0
-        t0 = time.time()
-        last_free_chk = t0
-        for line in p.stdout:
-            self._check()
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("frame="):
-                try:
-                    cur = int(line.split("=", 1)[1])
-                except ValueError:
-                    pass
-                if cur <= 0:
+            # ---- 阶段 2A：编码纯视频 ----
+            tmp_video = os.path.join(self.workdir, "video_only.mkv")
+            cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
+                   "-i", avs_path, "-an"] + self._video_args()
+            if self.max_frames:
+                cmd += ["-frames:v", str(total)]
+            cmd += ["-f", "matroska", tmp_video]
+
+            self._log("正在启动编码器（首次打开大文件 / 解码器初始化可能需要一些时间）...")
+            p = popen_hidden(cmd)
+            self.proc = p
+            cur = 0
+            t0 = time.time()
+            last_free_chk = t0
+            wd = self._start_watchdog("编码器")
+            for line in p.stdout:
+                wd["t"] = time.time()
+                self._check()
+                line = line.strip()
+                if not line:
                     continue
-                now = time.time()
-                if now - last_free_chk > 10:
-                    last_free_chk = now
+                if line.startswith("frame="):
                     try:
-                        _, _, free = shutil.disk_usage(self.workdir)
-                        if free < 2 * 1024 ** 3:
-                            try:
-                                p.terminate()
-                            except Exception:
-                                pass
-                            raise RuntimeError(
-                                "编码中止：输出磁盘剩余空间不足 2 GB，"
-                                "请清理空间或更换输出位置后重试")
-                    except OSError:
+                        cur = int(line.split("=", 1)[1])
+                    except ValueError:
                         pass
-                speed = cur / max(time.time() - t0, 0.001)
-                remain = (total - cur) / speed if speed > 0.01 else 0
-                pct = DEMUX_WEIGHT + (cur / max(total, 1)) * VIDEO_WEIGHT
-                info = "%d/%d 帧 · %.0f fps · 剩余约 %s" % (
-                    cur, total, speed, fmt_time(remain))
-                self.on_progress("encode", pct, info)
-            elif line.startswith("progress=") and line.endswith("end"):
-                break
-            elif "=" not in line:
-                self._log("  ffmpeg: " + line)
-        p.wait()
-        self.proc = None
-        self._check()
-        if p.returncode != 0:
-            raise RuntimeError("视频编码失败（ffmpeg 返回码 %s）" % p.returncode)
-        for f in (base, dep):
-            try:
-                if os.path.exists(f):
-                    os.remove(f)
-            except OSError:
-                pass
+                    if cur <= 0:
+                        continue
+                    now = time.time()
+                    if now - last_free_chk > 10:
+                        last_free_chk = now
+                        try:
+                            _, _, free = shutil.disk_usage(self.workdir)
+                            if free < 2 * 1024 ** 3:
+                                try:
+                                    p.terminate()
+                                except Exception:
+                                    pass
+                                raise RuntimeError(
+                                    "编码中止：输出磁盘剩余空间不足 2 GB，"
+                                    "请清理空间或更换输出位置后重试")
+                        except OSError:
+                            pass
+                    speed = cur / max(time.time() - t0, 0.001)
+                    remain = (total - cur) / speed if speed > 0.01 else 0
+                    pct = DEMUX_WEIGHT + (cur / max(total, 1)) * VIDEO_WEIGHT
+                    info = "%d/%d 帧 · %.0f fps · 剩余约 %s" % (
+                        cur, total, speed, fmt_time(remain))
+                    self.on_progress("encode", pct, info)
+                elif line.startswith("progress=") and line.endswith("end"):
+                    break
+                elif "=" not in line:
+                    self._log("  ffmpeg: " + line)
+            wd["stop"].set()
+            p.wait()
+            self.proc = None
+            self._check()
+            if p.returncode != 0:
+                raise RuntimeError("视频编码失败（ffmpeg 返回码 %s）" % p.returncode)
+
 
         # ---- 阶段 2B：提取音频到独立文件（顺序 I/O）----
         if self.audio_mode == "none" or not audio_src:
@@ -1501,6 +1558,14 @@ class MainWindow(QWidget):
         tip2.setObjectName("faintlabel")
         r.addWidget(tip2, 3)
         self.sec_adv.body_layout.addLayout(r)
+        r = QHBoxLayout()
+        self.chk_reuse = QCheckBox(
+            "复用已完成的编码（重跑 / 失败续跑时跳过视频编码，仅重做音频与混流）")
+        self.chk_reuse.setChecked(bool(self.cfg.get("reuse_video", True)))
+        self.chk_reuse.stateChanged.connect(lambda _=None: self._refresh_summaries())
+        r.addWidget(self.chk_reuse)
+        r.addStretch(1)
+        self.sec_adv.body_layout.addLayout(r)
         root.addWidget(self.sec_adv)
 
         # ---------- 无损拼接（多段合成全片） ----------
@@ -1711,9 +1776,12 @@ class MainWindow(QWidget):
             enc, self.cmb_qp.currentText().split("（")[0],
             self.cmb_speed.currentText()))
         self.sec_aud.set_summary("自动 · %s" % self.cmb_audio.currentText().split("（")[0])
-        self.sec_adv.set_summary("GOP %s%s · FFmpeg %s" % (
-            self.le_gop.text(), " · 完成后打开" if self.chk_open.isChecked() else "",
-            self.cmb_ffver.currentText().split("（")[0]))
+        self.sec_adv.set_summary("GOP %s%s · FFmpeg %s%s" % (
+            self.le_gop.text(),
+            " · 完成后打开" if self.chk_open.isChecked() else "",
+            self.cmb_ffver.currentText().split("（")[0],
+            " · 复用编码" if getattr(self, "chk_reuse", None) is not None
+            and self.chk_reuse.isChecked() else ""))
         n = sum(1 for p in self._seg_paths() if p)
         if n >= 2 and self.le_cat_out.text().strip():
             self.sec_cat.set_summary("%d 段已就绪 · 可开始拼接" % n)
@@ -1865,6 +1933,7 @@ class MainWindow(QWidget):
                "segs": self._seg_paths(),
                "cat_out": self.le_cat_out.text(),
                "encoder_touched": bool(self._encoder_touched or self._enc_user_fixed),
+               "reuse_video": self.chk_reuse.isChecked(),
                "open_after": self.chk_open.isChecked()}
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -2161,6 +2230,7 @@ class MainWindow(QWidget):
             container=container,
             encoder=self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf"),
             ffmpeg=ff_exe,
+            reuse_video=self.chk_reuse.isChecked(),
             rc=self._sel(RC_MODES, self.cmb_rc.currentText(), "cqp"),
             qp=qp, bitrate=bitrate,
             speed=self._sel(SPEEDS, self.cmb_speed.currentText(), "quality"),
@@ -2368,6 +2438,7 @@ def main():
         frames = int(get("--frames", "0") or 0)
         noaudio = "--noaudio" in args
         skipdemux = "--skipdemux" in args
+        reuse_video = "--reuse" in args
         qidx = int(get("--quality", "0") or 0)
         qp = QP_LEVELS[max(0, min(qidx, len(QP_LEVELS) - 1))][1]
         if not left or not right or not out:
@@ -2375,7 +2446,7 @@ def main():
                   "--out x.mkv [--layout full_sbs|half_sbs|full_tab|half_tab] "
                   "[--container mkv|mp4] [--encoder amf|nvenc|qsv|cpu] [--quality 0-3] "
                   "[--ffver master|8.0] "
-                  "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux]")
+                  "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux] [--reuse]")
             return 1
         job = ConvertJob(
             left, right, out,
@@ -2386,7 +2457,7 @@ def main():
             bitrate=int(get("--bitrate", "20") or 20),
             qp=qp,
             audio_mode=("none" if noaudio else "dual"),
-            max_frames=frames, skip_demux=skipdemux,
+            max_frames=frames, skip_demux=skipdemux, reuse_video=reuse_video,
             on_log=lambda s: print(s, flush=True),
             on_progress=lambda st, pct, info: print(
                 "[%5.1f%%] %s %s" % (pct, st, info), flush=True))

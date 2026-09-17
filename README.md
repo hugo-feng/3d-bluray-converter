@@ -9,7 +9,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.1.0/3DBlurayConverter_v2.1.0_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.1.1/3DBlurayConverter_v2.1.1_portable.zip
 
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 
@@ -39,7 +39,11 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.1.0/3DBlur
   支持添加 / 移除任意分段；mkvmerge 直封装不重编码，音轨 / 字幕 / 章节全部保留；
   先写临时文件成功后原子替换，中途失败不会破坏已有文件
 - **大小预估**：选择左右眼后实时预估成品大小；拼接时实时显示全片预计大小
-- **进度与倒计时**：解流 / 编码 / 音频 / 混流各阶段实时进度、帧率与剩余时间
+- **进度与倒计时**：解流 / 编码 / 音频 / 混流各阶段实时进度、帧率与剩余时间；
+  长时间无输出时自动提示"仍在运行"（大文件写盘 / 解码器初始化较慢时不再像卡死）
+- **失败续跑**：任务中间文件集中在专属文件夹（`_bd3d_work_*`）；
+  失败 / 取消时保留，重跑自动复用已完成的编码（跳过视频编码，直接重做音频与混流）；
+  转换成功后自动清理该文件夹
 - 智能磁盘空间预检、完成后自动打开输出目录、参数自动记忆
 - 深色 / 浅色主题一键切换、设置区折叠、平滑滚动、圆角控件、窗口比例自适应屏幕
 
