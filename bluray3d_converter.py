@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.0.0"
+APP_VERSION = "v2.0.1"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -159,6 +159,20 @@ def probe_nvidia_driver_version():
     except Exception:
         pass
     return None, ""
+
+
+MKV_COPY_AUDIO = ("aac", "ac3", "eac3", "dts", "truehd", "flac",
+                  "mp3", "opus", "vorbis", "alac")
+MP4_COPY_AUDIO = ("aac", "ac3", "eac3", "mp3", "alac")
+
+
+def audio_extract_opts(audio_codec, is_mp4):
+    """音频提取参数：可直通的编码原样复制，MKV 不支持的（如 pcm_bluray）无损转 FLAC"""
+    if audio_codec in (MP4_COPY_AUDIO if is_mp4 else MKV_COPY_AUDIO):
+        return ["-c:a", "copy"]
+    if is_mp4:
+        return ["-c:a", "ac3", "-b:a", "640k"]
+    return ["-c:a", "flac", "-compression_level", "8"]
 
 
 def build_video_args(encoder, speed, rc, qp, bitrate, gop):
@@ -621,6 +635,10 @@ class ConvertJob(threading.Thread):
                     if tracks and audio_idx < len(tracks):
                         audio_codec = tracks[audio_idx][2]
                         self._log("音轨 %s" % tracks[audio_idx][1])
+                        if audio_codec and audio_extract_opts(
+                                audio_codec, self.container == "mp4")[1] == "flac":
+                            self._log("提示：%s 无法直接封装进 MKV，"
+                                      "将在提取时无损转为 FLAC 音轨" % audio_codec)
                 else:
                     self._log("未找到音轨输入，将输出无音轨视频")
 
@@ -847,18 +865,19 @@ class ConvertJob(threading.Thread):
             return
         dur = total * 1001.0 / 24000.0 + 0.2
         is_mp4 = self.container == "mp4"
-        main_copy_ok = (not is_mp4) or audio_codec in ("aac", "ac3", "mp3")
         extract_jobs = []
         if self.audio_mode in ("dual", "copy"):
-            opts = ["-c:a", "copy"] if main_copy_ok else ["-c:a", "ac3", "-b:a", "640k"]
-            extract_jobs.append((os.path.join(self.workdir, "audio_main.mka"), opts))
+            extract_jobs.append((os.path.join(self.workdir, "audio_main.mka"),
+                                 audio_extract_opts(audio_codec, is_mp4)))
         if self.audio_mode in ("dual", "aac_only"):
             extract_jobs.append((os.path.join(self.workdir, "audio_aac.mka"),
                                  ["-c:a", "aac", "-b:a", "512k", "-ac", "6"]))
         audio_files = []
         base_pct = DEMUX_WEIGHT + VIDEO_WEIGHT
         for ai, (apath, aopts) in enumerate(extract_jobs):
-            self._log("提取音频 %d/%d ..." % (ai + 1, len(extract_jobs)))
+            mode_txt = {"copy": "原样直通", "flac": "无损转 FLAC",
+                        "ac3": "转码 AC3", "aac": "转码 AAC"}.get(aopts[1], aopts[1])
+            self._log("提取音频 %d/%d（%s）..." % (ai + 1, len(extract_jobs), mode_txt))
             cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
                    "-t", "%.3f" % dur, "-i", audio_src,
                    "-map", "0:a:%d" % audio_idx] + aopts + [apath]
