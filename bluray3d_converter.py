@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.6.0"
+APP_VERSION = "v2.6.1"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -1877,6 +1877,10 @@ class MainWindow(QWidget):
         r.addWidget(self.le_bitrate)
         r.addStretch(1)
         self.sec_enc.body_layout.addLayout(r)
+        tip_enc = QLabel("提示：鼠标悬浮在「编码器 / 速度 / 质量模式 / 质量」上可查看各选项区别与建议")
+        tip_enc.setObjectName("faintlabel")
+        tip_enc.setContentsMargins(70, 0, 0, 4)
+        self.sec_enc.body_layout.addWidget(tip_enc)
         root.addWidget(self.sec_enc)
 
         # ---------- 音频 ----------
@@ -2134,14 +2138,16 @@ class MainWindow(QWidget):
         pm = icon_pixmap(THEMES[self._theme]["theme_icon"], 18)
         if pm is not None:
             self.btn_theme.setIcon(QIcon(pm))
-            self.btn_theme.setIconSize(pm.size())
+            # 注意：pm.size() 在高 DPI 下是物理像素（如 27），
+            # 直接用作 iconSize 会导致图标超出按钮内容区、无法居中
+            self.btn_theme.setIconSize(QSize(18, 18))
         for sec in (self.sec_fmt, self.sec_enc, self.sec_aud, self.sec_adv, self.sec_cat):
             sec.set_theme(self._theme)
         for item in getattr(self, "seg_rows", []):
             pm = icon_pixmap("x.svg" if self._theme == "dark" else "x-light.svg", 14)
             if pm is not None:
                 item["rm"].setIcon(QIcon(pm))
-                item["rm"].setIconSize(pm.size())
+                item["rm"].setIconSize(QSize(14, 14))
         self._apply_checkbox_qss()
         if getattr(self, "pb", None) is not None:
             self.pb.set_theme(self._theme)
@@ -2616,7 +2622,7 @@ class MainWindow(QWidget):
 
     # ---------- 运行 ----------
     def _log(self, s):
-        line = time.strftime("[%H:%M:%S] ") + s
+        line = time.strftime("[%Y-%m-%d %H:%M:%S] ") + s
         self.log.appendPlainText(line)
         fh = getattr(self, "_log_fh", None)
         if fh is not None:
@@ -3126,7 +3132,7 @@ class MainWindow(QWidget):
         pm = icon_pixmap("x.svg" if self._theme == "dark" else "x-light.svg", 14)
         if pm is not None:
             rm.setIcon(QIcon(pm))
-            rm.setIconSize(pm.size())
+            rm.setIconSize(QSize(14, 14))
         self._relabel_segs()
 
     def _remove_seg_row(self, row):
