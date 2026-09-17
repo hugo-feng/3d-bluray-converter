@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.4.1"
+APP_VERSION = "v2.4.2"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -1871,6 +1871,9 @@ class MainWindow(QWidget):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
         self.log.setFixedHeight(180)
+        self.log.setStyleSheet(
+            "QPlainTextEdit { background: #101114; color: #e8e9ed; "
+            "border: 1px solid #2e3038; border-radius: 6px; padding: 6px; }")
         cv.addWidget(self.log)
         root.addWidget(card)
 
