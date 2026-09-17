@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QFileDialog, QMessageBox, QScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.2.0"
+APP_VERSION = "v2.2.1"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -1590,31 +1590,44 @@ class MainWindow(QWidget):
         self.le_gop = QLineEdit(str(self.cfg.get("gop", 96)))
         self.le_gop.setFixedWidth(60)
         r.addWidget(self.le_gop)
-        self.chk_open = QCheckBox("完成后打开输出目录")
-        self.chk_open.setChecked(bool(self.cfg.get("open_after", True)))
-        r.addWidget(self.chk_open)
-        r.addWidget(QLabel("限制帧数（调试）"))
-        self.le_frames = QLineEdit("")
-        self.le_frames.setFixedWidth(80)
-        r.addWidget(self.le_frames)
         r.addStretch(1)
         self.sec_adv.body_layout.addLayout(r)
+
         r = QHBoxLayout()
         r.addWidget(QLabel("FFmpeg 版本"))
         self.cmb_ffver = NoWheelComboBox()
         self.cmb_ffver.addItems([x[0] for x in FFMPEG_VERSIONS])
         self._set_combo(self.cmb_ffver, self.cfg.get("ffver", FFMPEG_VERSIONS[0][0]))
-        r.addWidget(self.cmb_ffver, 2)
+        self.cmb_ffver.setMinimumWidth(300)
+        r.addWidget(self.cmb_ffver)
+        r.addStretch(1)
+        self.sec_adv.body_layout.addLayout(r)
         tip2 = QLabel("N 卡 NVENC 报「驱动版本不满足」时，可切换兼容版 8.0 或改选其他编码器")
         tip2.setObjectName("faintlabel")
-        r.addWidget(tip2, 3)
+        tip2.setContentsMargins(70, 0, 0, 4)
+        self.sec_adv.body_layout.addWidget(tip2)
+
+        r = QHBoxLayout()
+        self.chk_open = QCheckBox("完成后打开输出目录")
+        self.chk_open.setChecked(bool(self.cfg.get("open_after", True)))
+        r.addWidget(self.chk_open)
+        r.addStretch(1)
         self.sec_adv.body_layout.addLayout(r)
+
         r = QHBoxLayout()
         self.chk_reuse = QCheckBox(
             "复用已完成的编码（重跑 / 失败续跑时跳过视频编码，仅重做音频与混流）")
         self.chk_reuse.setChecked(bool(self.cfg.get("reuse_video", True)))
         self.chk_reuse.stateChanged.connect(lambda _=None: self._refresh_summaries())
         r.addWidget(self.chk_reuse)
+        r.addStretch(1)
+        self.sec_adv.body_layout.addLayout(r)
+
+        r = QHBoxLayout()
+        r.addWidget(QLabel("限制帧数（调试）"))
+        self.le_frames = QLineEdit("")
+        self.le_frames.setFixedWidth(80)
+        r.addWidget(self.le_frames)
         r.addStretch(1)
         self.sec_adv.body_layout.addLayout(r)
         root.addWidget(self.sec_adv)
