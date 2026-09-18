@@ -9,8 +9,9 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.2/3DBlurayConverter_v2.9.2_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/latest
 
+> 上方链接始终指向**最新版本**；历史版本可在 [Releases](https://github.com/hugo-feng/3d-bluray-converter/releases) 页查看。
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 
 ## 界面预览
@@ -52,7 +53,7 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.2/3DBlur
 - **片段转码（只转其中一段）**：独立滑动开关（默认关闭，关闭时转换全片）；
   启用后拖动双端点滑块选择范围——区间内蓝色、区间外主题底色；
   端点时间分为「时 / 分 / 秒」三个输入框，支持鼠标拖动与精确输入；
-  **解流阶段即只解出所选片段**（  中间文件仅片段大小，耗时按片段大幅减小；**中间目录按「年月日时分秒 + 成品名」命名**）；
+  **解流阶段即只解出所选片段**（中间文件仅片段大小，耗时按片段大幅减小；**中间目录按「年月日时分秒 + 成品名」命名**）；
   音频与字幕自动同步裁剪；预估大小、用时与开始前确认弹窗均按片段时长计算
 - **整合字幕**：选择左眼后**自动探测源盘全部内嵌字幕**（PGS 图形字幕，含语言标识）
   与**外挂字幕文件**（同目录 / BDMV 常见位置的 .sup / .pgs / .srt / .ass），
@@ -88,7 +89,7 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.2/3DBlur
 1. 双击 `3DBlurayConverter.exe` 打开软件（右上角可切换深色 / 浅色主题）
 2. 「左眼文件」→ 浏览选择 `BDMV\STREAM\00000.m2ts`（右眼会自动配对）
 3. 「输出到」→ 选择保存路径（下方会**实时预估成品大小**；正式开始前会自动检查磁盘空间）
-4. 按需展开「输出格式 / 编码设置 / 音频 / 高级」调整参数（收起时右侧显示当前配置摘要）
+4. 按需展开「输出格式 / 片段范围 / 编码设置 / 音频 / 字幕 / 高级」调整参数（收起时右侧显示当前配置摘要）
 5. 点击「开始转换」——开始前先做**编码器可用性预检**（约 1 秒），
    进度区实时显示 解流中 / 编码中 / 音频提取 / 混流封装 与预计剩余时间
 6. 若影片分多张碟（或分成多个文件）：在「无损拼接」区按顺序添加各段
@@ -111,7 +112,7 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.2/3DBlur
   - NVIDIA 显卡（NVENC 硬编 HEVC；驱动 570+ 使用兼容版 FFmpeg，驱动 610+ 可用最新版）
   - Intel 核显 / 独显（QSV 硬编 HEVC）
   - 无兼容显卡时可用 CPU x265（速度较慢）
-- **磁盘空间**：转换需要「解流中间文件（≈源文件大小）+ 成品（软件会预估）」两份额度，
+- **磁盘空间**：转换需要「解流中间文件（≈源文件大小；**片段模式只解所选区间，仅需片段大小**）+ 成品（软件会预估）」两份额度，
   正式开始前软件会自动预检并给出明确提示
 - **Python 3.10+**（仅源码运行需要；EXE 便携版免安装、免环境）
 
@@ -161,8 +162,25 @@ python bluray3d_converter.py --cli ^
   --out "G:\output\movie.mkv" ^
   [--layout full_sbs|half_sbs|full_tab|half_tab] ^
   [--container mkv|mp4] [--encoder amf|nvenc|qsv|cpu] [--ffver master|8.0] ^
-  [--quality 0-3] [--bitrate 20] [--frames N] [--noaudio] [--skipdemux]
+  [--quality 0-3] [--bitrate 20] [--frames N] [--noaudio] [--skipdemux] ^
+  [--reuse] ^
+  [--sub N | --subfile 字幕文件路径] ^
+  [--start HH:MM:SS --end HH:MM:SS] [--keepwork]
 ```
+
+| 参数 | 说明 |
+|---|---|
+| `--layout` | 输出布局：full_sbs / half_sbs / full_tab / half_tab |
+| `--container` | 容器：mkv（支持 DTS 原声）/ mp4（手机兼容） |
+| `--encoder` / `--quality` | 编码器与质量档（0 最高） |
+| `--ffver` | FFmpeg 版本：master / 8.0 |
+| `--frames N` | 只编码前 N 帧（调试） |
+| `--noaudio` | 不提取音频 |
+| `--reuse` | 复用已完成编码（跳过视频编码） |
+| `--sub N` | 整合第 N 条内嵌字幕（1 起） |
+| `--subfile 路径` | 整合指定外挂字幕文件 |
+| `--start` / `--end` | 只转换该时间区间（片段模式） |
+| `--keepwork` | 保留中间文件夹（调试用） |
 
 ## 打包 EXE
 
@@ -177,7 +195,7 @@ python -m PyInstaller --noconfirm --onedir --windowed --name 3DBlurayConverter ^
 
 ```
 BD 3D 原盘（BDMV\STREAM）
-  │  tsMuxeR 解出两路 ES
+  │  tsMuxeR 解出两路 ES（片段模式只解所选区间）
   ▼
 left.264（左眼基础视图） + right.mvc（右眼依赖视图）
   │  AviSynth + FRIMSource 解码 MVC 双视图
@@ -188,7 +206,7 @@ left.264（左眼基础视图） + right.mvc（右眼依赖视图）
 SBS / TAB 立体帧
   │  ffmpeg 硬件编码：hevc_amf / hevc_nvenc / hevc_qsv，或 CPU libx265
   ▼
-HEVC 视频（含原版音轨 + AAC 兼容轨）
+HEVC 视频（含原版音轨 + AAC 兼容轨 + 可选内嵌字幕）
 
 双碟完整片：
 两段成品 ── mkvmerge 直封装（+）── 完整片（无损、保留音轨/字幕/章节）
