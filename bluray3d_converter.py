@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.4"
+APP_VERSION = "v2.9.5"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -563,11 +563,11 @@ def make_msgbox(parent, icon, text, buttons, default_button=None):
     return mb
 
 
-def mk_label(text, width=60):
-    """统一样式：固定宽度标签（右对齐——右边界对齐且紧贴控件，兼顾整齐与紧凑）"""
+def mk_label(text, width=88):
+    """统一样式：固定宽度标签（左对齐，各行左边界对齐）"""
     lb = QLabel(text)
     lb.setFixedWidth(width)
-    lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    lb.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     return lb
 
 
@@ -862,7 +862,7 @@ class ConvertJob(threading.Thread):
                  container="mkv", encoder="amf", rc="cqp", qp=18, bitrate=20,
                  speed="quality", gop=96, audio_mode="dual", audio_track=None,
                  open_after=False, max_frames=0, skip_demux=False, ffmpeg=None,
-                 reuse_video=False, subtitle=None, clip=None,
+                 reuse_video=False, subtitle=None, clip=None, keep_work=False,
                  on_log=None, on_progress=None, on_done=None, on_error=None):
         super().__init__(daemon=True)
         self.left_file = left_file
@@ -880,6 +880,7 @@ class ConvertJob(threading.Thread):
         self.audio_track = audio_track
         self.subtitle = subtitle or None
         self.clip = clip or None
+        self.keep_work = bool(keep_work)
         self.open_after = open_after
         self.max_frames = max_frames
         self.skip_demux = skip_demux
@@ -1065,7 +1066,8 @@ class ConvertJob(threading.Thread):
                 pass
             self.stats["total"] = time.time() - t_all
             self._log("完成：" + self.out_file)
-            self._cleanup_workdir()
+            if not self.keep_work:
+                self._cleanup_workdir()
             self.on_progress("done", 100.0, "全部完成", -1.0)
             if self.open_after:
                 try:
@@ -1333,6 +1335,13 @@ class ConvertJob(threading.Thread):
             avs_path = os.path.join(self.workdir, "decode.avs")
             with open(avs_path, "w", encoding="utf-8") as f:
                 f.write(self._build_avs(base, dep, nframes, total))
+            try:
+                import hashlib as _hl
+                self._log("[调试] decode.avs md5=%s 内容首行=%s" % (
+                    _hl.md5(open(avs_path, "rb").read()).hexdigest()[:12],
+                    open(avs_path, encoding="utf-8").read().splitlines()[1][:80]))
+            except Exception as _e:
+                self._log("[调试] avs 校验失败：%s" % _e)
 
             # ---- 阶段 2A：编码纯视频 ----
             tmp_video = os.path.join(self.workdir, "video_only.mkv")
@@ -1341,6 +1350,7 @@ class ConvertJob(threading.Thread):
             if self.max_frames or self.clip:
                 cmd += ["-frames:v", str(total)]
             cmd += ["-f", "matroska", tmp_video]
+            self._log("[调试] 编码命令：" + " ".join(cmd))
 
             self._log("正在启动编码器（首次打开大文件 / 解码器初始化可能需要一些时间）...")
             p = popen_hidden(cmd)
@@ -1421,15 +1431,20 @@ class ConvertJob(threading.Thread):
                 else:
                     self._log("字幕文件不存在，本次未整合字幕：%s" % sval)
             else:
-                self._log("提取内嵌字幕（PGS #%d，%s，完整提取后按片段对齐）..."
+                self._log("提取内嵌字幕（PGS #%d，%s，按片段范围裁剪）..."
                           % (sval + 1, slang))
                 sub_path = os.path.join(self.workdir, "subtitle.sup")
-                # 注意：不能用 -ss/-t 对字幕流做输入裁剪——PGS 的字幕段（epoch）
-                # 可能跨越裁剪点，输入 seek 会丢失该段字幕（表现为字幕缺失/错位）。
-                # 因此完整提取，混流时用 -itsoffset 平移对齐片段起点。
+                # 重要：混流阶段“绝不能”用 -itsoffset 负偏移（会使全部流被整体
+                # 后移、视频时间戳从片段起点开始而画面卡死）。这里在提取时用
+                # 输出侧 -ss/-t 把字幕裁到片段范围并归零（输出侧 seek 对 copy
+                # 流是“丢弃 + 重定基准”，不会像输入侧 seek 那样破坏 PGS 字幕段）。
+                _c0 = self.clip[0] if self.clip else 0.0
+                _sub_dur = (self.clip[1] - self.clip[0]) if self.clip else max(dur, 1.0)
                 cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats",
-                       "-i", audio_src, "-map", "0:s:%d" % sval,
-                       "-c", "copy", sub_path]
+                       "-i", audio_src, "-map", "0:s:%d" % sval, "-c", "copy",
+                       "-ss", "%.3f" % _c0,
+                       "-t", "%.3f" % max(_sub_dur + 1.0, 1.0),
+                       sub_path]
                 p = popen_hidden(cmd)
                 self.proc = p
                 for line in p.stdout:
@@ -1505,13 +1520,9 @@ class ConvertJob(threading.Thread):
             cmd += ["-i", a]
         # 字幕必须作为输入放在全部 -map 之前
         # （-map 若出现在 -i 之前会被 ffmpeg 当作该输入的选项而报错）
-        # 片段模式下用 -itsoffset 把完整字幕平移对齐片段起点
+        # 注意：这里不能再加 -itsoffset（已在字幕提取阶段裁剪归零）
         if sub_file is not None:
-            _c0 = self.clip[0] if self.clip else 0.0
-            if _c0 > 0:
-                cmd += ["-itsoffset", "%.3f" % (-_c0), "-i", sub_file]
-            else:
-                cmd += ["-i", sub_file]
+            cmd += ["-i", sub_file]
         cmd += ["-map", "0:v"]
         for i in range(len(audio_files)):
             cmd += ["-map", "%d:a" % (i + 1)]
@@ -2405,7 +2416,7 @@ class MainWindow(QWidget):
         self.sec_clip.body_layout.addLayout(r)
         self.lbl_clip_info = QLabel("选择左眼文件后可设置片段范围")
         self.lbl_clip_info.setObjectName("faintlabel")
-        self.lbl_clip_info.setContentsMargins(68, 0, 0, 4)
+        self.lbl_clip_info.setContentsMargins(96, 0, 0, 4)
         self.sec_clip.body_layout.addWidget(self.lbl_clip_info)
         root.addWidget(self.sec_clip)
 
@@ -2463,7 +2474,7 @@ class MainWindow(QWidget):
         r.addStretch(1)
         self.sec_enc.body_layout.addLayout(r)
         r = QHBoxLayout()
-        r.addWidget(mk_label("码率"))
+        r.addWidget(mk_label("码率(M)"))
         self.le_bitrate = QLineEdit(str(self.cfg.get("bitrate", 20)))
         self.le_bitrate.setFixedWidth(100)
         self.le_bitrate.setToolTip("目标平均码率（仅「目标平均码率 / 固定码率」模式有效）")
@@ -2472,7 +2483,7 @@ class MainWindow(QWidget):
         self.sec_enc.body_layout.addLayout(r)
         tip_enc = QLabel("提示：鼠标悬浮在「编码器 / 速度 / 质量模式 / 质量」上可查看各选项区别与建议")
         tip_enc.setObjectName("faintlabel")
-        tip_enc.setContentsMargins(68, 0, 0, 4)
+        tip_enc.setContentsMargins(96, 0, 0, 4)
         self.sec_enc.body_layout.addWidget(tip_enc)
         root.addWidget(self.sec_enc)
 
@@ -2521,14 +2532,14 @@ class MainWindow(QWidget):
             "外挂字幕一般与视频同目录（.sup / .pgs / .srt / .ass），选中左眼后自动探索，也可点「浏览」手动选择")
         tip_sub.setObjectName("faintlabel")
         tip_sub.setWordWrap(True)
-        tip_sub.setContentsMargins(68, 0, 0, 4)
+        tip_sub.setContentsMargins(96, 0, 0, 4)
         self.sec_sub.body_layout.addWidget(tip_sub)
         root.addWidget(self.sec_sub)
 
         # ---------- 高级 ----------
         self.sec_adv = Section("高级")
         r = QHBoxLayout()
-        r.addWidget(mk_label("关键帧"))
+        r.addWidget(mk_label("关键帧间隔"))
         self.le_gop = QLineEdit(str(self.cfg.get("gop", 96)))
         self.le_gop.setFixedWidth(100)
         r.addWidget(self.le_gop)
@@ -2536,7 +2547,7 @@ class MainWindow(QWidget):
         self.sec_adv.body_layout.addLayout(r)
 
         r = QHBoxLayout()
-        r.addWidget(mk_label("FFmpeg"))
+        r.addWidget(mk_label("FFmpeg 版本"))
         self.cmb_ffver = NoWheelComboBox()
         self.cmb_ffver.addItems([x[0] for x in FFMPEG_VERSIONS])
         self._set_combo(self.cmb_ffver, self.cfg.get("ffver", FFMPEG_VERSIONS[0][0]))
@@ -2546,7 +2557,7 @@ class MainWindow(QWidget):
         self.sec_adv.body_layout.addLayout(r)
         tip2 = QLabel("N 卡 NVENC 报「驱动版本不满足」时，可切换兼容版 8.0 或改选其他编码器")
         tip2.setObjectName("faintlabel")
-        tip2.setContentsMargins(68, 0, 0, 4)
+        tip2.setContentsMargins(96, 0, 0, 4)
         self.sec_adv.body_layout.addWidget(tip2)
 
         r = QHBoxLayout()
@@ -2725,7 +2736,7 @@ class MainWindow(QWidget):
     def _file_row(self, parent, label, le, browse_cmd, hint="", right_pad=0):
         row = QHBoxLayout()
         lb = QLabel(label)
-        lb.setFixedWidth(60)
+        lb.setFixedWidth(88)
         lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         row.addWidget(lb)
         row.addWidget(le, 1)
@@ -2741,7 +2752,7 @@ class MainWindow(QWidget):
         parent.addLayout(row)
         h = QLabel(hint)
         h.setObjectName("faintlabel")
-        h.setContentsMargins(68, 0, 0, 4)
+        h.setContentsMargins(96, 0, 0, 4)
         parent.addWidget(h)
         return h
 
@@ -3535,8 +3546,21 @@ class MainWindow(QWidget):
                  "mux": ()}.get(stage, ())
         est_after = sum(float(plan.get(k, 0.0) or 0.0) for k in after)
         if stage_remain is not None and stage_remain > 0:
-            self.lbl_eta.setText(
-                "总剩余约 %s" % fmt_time(stage_remain + est_after))
+            # 平滑处理：记录最近若干次估计取中位数，且更新间隔不小于 1.5 秒，
+            # 避免阶段内实测速度波动导致总剩余时长频繁跳动
+            hist = getattr(self, "_eta_hist", None)
+            if hist is None:
+                hist = self._eta_hist = []
+            hist.append(float(stage_remain) + est_after)
+            if len(hist) > 5:
+                hist.pop(0)
+            now = time.time()
+            if now - getattr(self, "_eta_last", 0.0) < 1.5:
+                return
+            self._eta_last = now
+            vals = sorted(hist)
+            mid = vals[len(vals) // 2]
+            self.lbl_eta.setText("总剩余约 %s" % fmt_time(mid))
             return
         if stage and not plan:
             self.lbl_eta.setText("总剩余：计算中...")
@@ -3564,6 +3588,8 @@ class MainWindow(QWidget):
         self.btn_start.setObjectName("accent")
         self._repolish(self.btn_start)
         self._job_t0 = None
+        self._eta_hist = []
+        self._eta_last = 0.0
         self.lbl_eta.setText("")
         self._lock_params(False)
         self._update_start_enabled()
@@ -4239,6 +4265,7 @@ def main():
         frames = int(get("--frames", "0") or 0)
         noaudio = "--noaudio" in args
         skipdemux = "--skipdemux" in args
+        keepwork = "--keepwork" in args
         reuse_video = "--reuse" in args
         subtitle_arg = None
         sub_sel = get("--sub")
@@ -4278,6 +4305,7 @@ def main():
             audio_mode=("none" if noaudio else "dual"),
             subtitle=subtitle_arg,
             clip=clip_arg,
+            keep_work=keepwork,
             max_frames=frames, skip_demux=skipdemux, reuse_video=reuse_video,
             on_log=lambda s: print(s, flush=True),
             on_progress=lambda st, pct, info, rem=-1.0: print(
