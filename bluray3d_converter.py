@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.2"
+APP_VERSION = "v2.9.3"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -563,7 +563,7 @@ def make_msgbox(parent, icon, text, buttons, default_button=None):
     return mb
 
 
-def mk_label(text, width=72):
+def mk_label(text, width=84):
     """统一样式：固定宽度标签（文字居中，保证各行标签列对齐且不与控件脱开）"""
     lb = QLabel(text)
     lb.setFixedWidth(width)
@@ -2400,7 +2400,7 @@ class MainWindow(QWidget):
         self.sec_clip.body_layout.addLayout(r)
         self.lbl_clip_info = QLabel("选择左眼文件后可设置片段范围")
         self.lbl_clip_info.setObjectName("faintlabel")
-        self.lbl_clip_info.setContentsMargins(80, 0, 0, 4)
+        self.lbl_clip_info.setContentsMargins(92, 0, 0, 4)
         self.sec_clip.body_layout.addWidget(self.lbl_clip_info)
         root.addWidget(self.sec_clip)
 
@@ -2467,7 +2467,7 @@ class MainWindow(QWidget):
         self.sec_enc.body_layout.addLayout(r)
         tip_enc = QLabel("提示：鼠标悬浮在「编码器 / 速度 / 质量模式 / 质量」上可查看各选项区别与建议")
         tip_enc.setObjectName("faintlabel")
-        tip_enc.setContentsMargins(80, 0, 0, 4)
+        tip_enc.setContentsMargins(92, 0, 0, 4)
         self.sec_enc.body_layout.addWidget(tip_enc)
         root.addWidget(self.sec_enc)
 
@@ -2487,13 +2487,17 @@ class MainWindow(QWidget):
         r.addWidget(self.cmb_audio, 1)
         r.addStretch(1)
         self.sec_aud.body_layout.addLayout(r)
+        root.addWidget(self.sec_aud)
+
+        # ---------- 字幕（独立区） ----------
+        self.sec_sub = Section("字幕（可选：整合一条内嵌或外挂字幕）")
         r = QHBoxLayout()
-        r.addWidget(mk_label("字幕"))
+        r.addWidget(mk_label("整合字幕"))
         self.cmb_sub = NoWheelComboBox()
         self.cmb_sub.addItem("不整合字幕（默认）")
         self.cmb_sub.setToolTip(
             "从源盘内嵌的 PGS 字幕中选择一条整合进成品（仅 MKV 容器支持）。\n"
-            "选择左眼文件后自动列出全部字幕轨（含语言标识）。\n"
+            "选择左眼文件后自动列出全部字幕轨（含语言标识，默认选中中文字幕）。\n"
             "提示：蓝光 3D 盘常有多条同语言字幕（正片版 / 不同画布版），\n"
             "整合后字幕大小与位置由播放器按视频尺寸渲染，建议多试几条选择显示效果最好的。")
         self.cmb_sub.setMinimumWidth(280)
@@ -2506,15 +2510,15 @@ class MainWindow(QWidget):
         self._sub_browse.clicked.connect(self._pick_sub_file)
         r.addWidget(self._sub_browse)
         r.addStretch(1)
-        self.sec_aud.body_layout.addLayout(r)
+        self.sec_sub.body_layout.addLayout(r)
         tip_sub = QLabel(
             "蓝光原盘的字幕内嵌在 BDMV\\STREAM\\*.m2ts（PGS 图形字幕，已自动列出）；"
             "外挂字幕一般与视频同目录（.sup / .pgs / .srt / .ass），选中左眼后自动探索，也可点「浏览」手动选择")
         tip_sub.setObjectName("faintlabel")
         tip_sub.setWordWrap(True)
-        tip_sub.setContentsMargins(80, 0, 0, 4)
-        self.sec_aud.body_layout.addWidget(tip_sub)
-        root.addWidget(self.sec_aud)
+        tip_sub.setContentsMargins(92, 0, 0, 4)
+        self.sec_sub.body_layout.addWidget(tip_sub)
+        root.addWidget(self.sec_sub)
 
         # ---------- 高级 ----------
         self.sec_adv = Section("高级")
@@ -2537,7 +2541,7 @@ class MainWindow(QWidget):
         self.sec_adv.body_layout.addLayout(r)
         tip2 = QLabel("N 卡 NVENC 报「驱动版本不满足」时，可切换兼容版 8.0 或改选其他编码器")
         tip2.setObjectName("faintlabel")
-        tip2.setContentsMargins(80, 0, 0, 4)
+        tip2.setContentsMargins(92, 0, 0, 4)
         self.sec_adv.body_layout.addWidget(tip2)
 
         r = QHBoxLayout()
@@ -2716,7 +2720,7 @@ class MainWindow(QWidget):
     def _file_row(self, parent, label, le, browse_cmd, hint="", right_pad=0):
         row = QHBoxLayout()
         lb = QLabel(label)
-        lb.setFixedWidth(72)
+        lb.setFixedWidth(84)
         row.addWidget(lb)
         row.addWidget(le, 1)
         b = QPushButton("浏览")
@@ -2731,7 +2735,7 @@ class MainWindow(QWidget):
         parent.addLayout(row)
         h = QLabel(hint)
         h.setObjectName("faintlabel")
-        h.setContentsMargins(80, 0, 0, 4)
+        h.setContentsMargins(92, 0, 0, 4)
         parent.addWidget(h)
         return h
 
@@ -3015,11 +3019,12 @@ class MainWindow(QWidget):
             enc, self.cmb_qp.currentText().split("（")[0],
             self.cmb_speed.currentText()))
         self.sec_aud.set_summary(
-            "自动 · %s%s" % (
-                self.cmb_audio.currentText().split("（")[0],
-                " · 整合字幕" if getattr(self, "subtitle_tracks", None)
-                and getattr(self, "cmb_sub", None) is not None
-                and self.cmb_sub.currentIndex() > 0 else ""))
+            "自动 · %s" % self.cmb_audio.currentText().split("（")[0])
+        if getattr(self, "cmb_sub", None) is not None:
+            if self.cmb_sub.currentIndex() > 0:
+                self.sec_sub.set_summary("整合：%s" % self.cmb_sub.currentText())
+            else:
+                self.sec_sub.set_summary("不整合")
         self.sec_adv.set_summary("GOP %s%s · FFmpeg %s%s" % (
             self.le_gop.text(),
             " · 完成后打开" if self.chk_open.isChecked() else "",
