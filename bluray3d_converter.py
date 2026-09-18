@@ -27,7 +27,8 @@ import threading
 import subprocess
 
 from PySide6.QtCore import (Qt, QObject, Signal, QTimer, QRectF, QSize,
-                            QPropertyAnimation, QEasingCurve, QAbstractAnimation)
+                            QPropertyAnimation, QEasingCurve, QAbstractAnimation,
+                            Property)
 from PySide6.QtGui import (QIcon, QFont, QPainter, QPainterPath, QColor, QPen,
                            QPalette)
 from PySide6.QtWidgets import (
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.0"
+APP_VERSION = "v2.9.1"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -560,6 +561,13 @@ def make_msgbox(parent, icon, text, buttons, default_button=None):
     pal.setColor(QPalette.Text, QColor(c["text"]))
     mb.setPalette(pal)
     return mb
+
+
+def mk_label(text, width=72):
+    """统一样式：固定宽度标签（保证各行左对齐）"""
+    lb = QLabel(text)
+    lb.setFixedWidth(width)
+    return lb
 
 
 def msg_info(parent, text):
@@ -1442,11 +1450,14 @@ class ConvertJob(threading.Thread):
                "-i", tmp_video]
         for a in audio_files:
             cmd += ["-i", a]
+        # 字幕必须作为输入放在全部 -map 之前
+        # （-map 若出现在 -i 之前会被 ffmpeg 当作该输入的选项而报错）
+        if sub_file is not None:
+            cmd += ["-i", sub_file]
         cmd += ["-map", "0:v"]
         for i in range(len(audio_files)):
             cmd += ["-map", "%d:a" % (i + 1)]
         if sub_file is not None:
-            cmd += ["-i", sub_file]
             cmd += ["-map", "%d:s" % (1 + len(audio_files))]
         cmd += ["-c", "copy"]
         if len(audio_files) >= 1:
@@ -1896,6 +1907,77 @@ class RangeSlider(QWidget):
             self.set_values(self._lo, max(v, self._lo + 2.0), emit=True)
 
 
+class ToggleSwitch(QWidget):
+    """滑动开关（自绘 + 左右切换动画），API 兼容 QCheckBox 的常用方法"""
+
+    toggled = Signal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._checked = False
+        self._theme = "dark"
+        self._pos = 0.0
+        self._anim = QPropertyAnimation(self, b"knob", self)
+        self._anim.setDuration(140)
+        self._anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self.setFixedSize(42, 22)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def _get_knob(self):
+        return self._pos
+
+    def _set_knob(self, v):
+        self._pos = max(0.0, min(float(v), 1.0))
+        self.update()
+
+    knob = Property(float, _get_knob, _set_knob)
+
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, on):
+        on = bool(on)
+        if on == self._checked:
+            return
+        self._checked = on
+        self._anim.stop()
+        self._anim.setStartValue(self._pos)
+        self._anim.setEndValue(1.0 if on else 0.0)
+        self._anim.start()
+        self.toggled.emit(on)
+
+    def set_theme(self, theme):
+        self._theme = theme
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.setChecked(not self._checked)
+            event.accept()
+
+    def paintEvent(self, _event):
+        c = THEMES.get(self._theme, THEMES["dark"])
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        w, h = float(self.width()), float(self.height())
+        r = h / 2.0
+        p.setPen(Qt.NoPen)
+        if not self.isEnabled():
+            bg = QColor("#3a3c44" if self._theme == "dark" else "#dcdce0")
+        elif self._checked:
+            bg = QColor(c["accent"])
+        else:
+            bg = QColor("#4a4d57" if self._theme == "dark" else "#c4c4cc")
+        p.setBrush(bg)
+        p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), r, r)
+        kr = r - 3.0
+        cx = 3.0 + kr + (w - 6.0 - kr * 2.0) * self._pos
+        cy = h / 2.0
+        p.setPen(QPen(QColor(0, 0, 0, 50), 1))
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(QRectF(cx - kr, cy - kr, kr * 2, kr * 2))
+
+
 class SmoothScrollArea(QScrollArea):
     """平滑滚动区：滚轮按动画过渡，避免一格格跳变"""
 
@@ -2174,16 +2256,18 @@ class MainWindow(QWidget):
         # ---------- 输出格式 ----------
         self.sec_fmt = Section("输出格式")
         r = QHBoxLayout()
-        r.addWidget(QLabel("3D 布局"))
+        r.addWidget(mk_label("3D 布局"))
         self.cmb_layout = NoWheelComboBox()
         self.cmb_layout.addItems([x[0] for x in LAYOUTS])
         self._set_combo(self.cmb_layout, self.cfg.get("layout", LAYOUTS[0][0]))
-        r.addWidget(self.cmb_layout, 2)
-        r.addWidget(QLabel("容器"))
+        self.cmb_layout.setFixedWidth(300)
+        r.addWidget(self.cmb_layout)
+        r.addWidget(mk_label("容器"))
         self.cmb_container = NoWheelComboBox()
         self.cmb_container.addItems([x[0] for x in CONTAINERS])
         self._set_combo(self.cmb_container, self.cfg.get("container", CONTAINERS[0][0]))
-        r.addWidget(self.cmb_container, 2)
+        self.cmb_container.setFixedWidth(190)
+        r.addWidget(self.cmb_container)
         r.addStretch(1)
         self.sec_fmt.body_layout.addLayout(r)
         root.addWidget(self.sec_fmt)
@@ -2191,17 +2275,21 @@ class MainWindow(QWidget):
         # ---------- 片段范围（只转换指定区间） ----------
         self.sec_clip = Section("片段范围（只转换指定区间）")
         r = QHBoxLayout()
-        self.chk_clip = QCheckBox("启用片段范围（默认关闭，关闭时转换全片）")
-        self.chk_clip.setChecked(False)
+        self.chk_clip = ToggleSwitch()
         self.chk_clip.setToolTip(
-            "勾选后：只转换两端点之间的视频（其余部分不转换）；\n"
+            "开启后：只转换两端点之间的视频（其余部分不转换）；\n"
             "解流阶段即只解出该片段，中间文件与耗时都会大幅减小")
-        self.chk_clip.stateChanged.connect(self._on_clip_toggle)
+        self.chk_clip.toggled.connect(self._on_clip_toggle)
         r.addWidget(self.chk_clip)
+        lb_clip = QLabel("启用片段范围")
+        r.addWidget(lb_clip)
+        hint_clip = QLabel("默认关闭（转换全片）；开启后只转换两时间点之间的视频")
+        hint_clip.setObjectName("faintlabel")
+        r.addWidget(hint_clip)
         r.addStretch(1)
         self.sec_clip.body_layout.addLayout(r)
         r = QHBoxLayout()
-        r.addWidget(QLabel("起点"))
+        r.addWidget(mk_label("起点"))
         self.clip_lo_boxes = []
         for unit, mx in (("时", 3), ("分", 2), ("秒", 2)):
             e = QLineEdit("00")
@@ -2216,7 +2304,7 @@ class MainWindow(QWidget):
             ul.setObjectName("faintlabel")
             r.addWidget(ul)
         r.addSpacing(14)
-        r.addWidget(QLabel("终点"))
+        r.addWidget(mk_label("终点"))
         self.clip_hi_boxes = []
         for unit, mx in (("时", 3), ("分", 2), ("秒", 2)):
             e = QLineEdit("00")
@@ -2244,22 +2332,23 @@ class MainWindow(QWidget):
         self.sec_clip.body_layout.addWidget(self.clip_slider)
         self.lbl_clip_info = QLabel("选择左眼文件后可设置片段范围")
         self.lbl_clip_info.setObjectName("faintlabel")
-        self.lbl_clip_info.setContentsMargins(70, 0, 0, 4)
+        self.lbl_clip_info.setContentsMargins(80, 0, 0, 4)
         self.sec_clip.body_layout.addWidget(self.lbl_clip_info)
         root.addWidget(self.sec_clip)
 
         # ---------- 编码设置 ----------
         self.sec_enc = Section("编码设置")
         r = QHBoxLayout()
-        r.addWidget(QLabel("编码器"))
+        r.addWidget(mk_label("编码器"))
         self.cmb_encoder = NoWheelComboBox()
         self.cmb_encoder.addItems([x[0] for x in ENCODERS])
         self._set_combo(self.cmb_encoder, self.cfg.get("encoder", ENCODERS[0][0]))
         self.cmb_encoder.setToolTip(ENCODER_TIP_BASE)
         self.cmb_encoder.activated.connect(
             lambda _=None: setattr(self, "_encoder_touched", True))
-        r.addWidget(self.cmb_encoder, 2)
-        r.addWidget(QLabel("速度"))
+        self.cmb_encoder.setFixedWidth(300)
+        r.addWidget(self.cmb_encoder)
+        r.addWidget(mk_label("速度"))
         self.cmb_speed = NoWheelComboBox()
         self.cmb_speed.addItems([x[0] for x in SPEEDS])
         self._set_combo(self.cmb_speed, self.cfg.get("speed", SPEEDS[0][0]))
@@ -2268,11 +2357,12 @@ class MainWindow(QWidget):
             "  · 质量优先：编码最慢，同画质下体积最小（画质最佳）\n"
             "  · 平衡：速度与体积折中\n"
             "  · 速度优先：编码最快，体积略大")
-        r.addWidget(self.cmb_speed, 1)
+        self.cmb_speed.setFixedWidth(190)
+        r.addWidget(self.cmb_speed)
         r.addStretch(1)
         self.sec_enc.body_layout.addLayout(r)
         r = QHBoxLayout()
-        r.addWidget(QLabel("质量模式"))
+        r.addWidget(mk_label("质量模式"))
         self.cmb_rc = NoWheelComboBox()
         self.cmb_rc.addItems([x[0] for x in RC_MODES])
         self._set_combo(self.cmb_rc, self.cfg.get("rc", RC_MODES[0][0]))
@@ -2283,8 +2373,9 @@ class MainWindow(QWidget):
             "  · 目标平均码率（VBR）：按目标码率编码，体积可控、画质浮动\n"
             "  · 固定码率（CBR）：码率恒定，体积固定、兼容性最好\n"
             "  切换后，下方「质量」或「码率」输入框会自动启用其一")
-        r.addWidget(self.cmb_rc, 1)
-        r.addWidget(QLabel("质量"))
+        self.cmb_rc.setFixedWidth(300)
+        r.addWidget(self.cmb_rc)
+        r.addWidget(mk_label("质量"))
         self.cmb_qp = NoWheelComboBox()
         self.cmb_qp.addItems([x[0] for x in QP_LEVELS])
         self._set_combo(self.cmb_qp, self.cfg.get("qp", QP_LEVELS[0][0]))
@@ -2294,35 +2385,42 @@ class MainWindow(QWidget):
             "  · 标准 CQP 20：约 21 Mbps（推荐）\n"
             "  · 压缩 CQP 22：约 15 Mbps\n"
             "  · 高压缩 CQP 24：约 10 Mbps（体积最小）")
-        r.addWidget(self.cmb_qp, 2)
-        r.addWidget(QLabel("码率(M)"))
+        self.cmb_qp.setFixedWidth(190)
+        r.addWidget(self.cmb_qp)
+        r.addStretch(1)
+        self.sec_enc.body_layout.addLayout(r)
+        r = QHBoxLayout()
+        r.addWidget(mk_label("码率(M)"))
         self.le_bitrate = QLineEdit(str(self.cfg.get("bitrate", 20)))
-        self.le_bitrate.setFixedWidth(60)
+        self.le_bitrate.setFixedWidth(100)
+        self.le_bitrate.setToolTip("目标平均码率（仅「目标平均码率 / 固定码率」模式有效）")
         r.addWidget(self.le_bitrate)
         r.addStretch(1)
         self.sec_enc.body_layout.addLayout(r)
         tip_enc = QLabel("提示：鼠标悬浮在「编码器 / 速度 / 质量模式 / 质量」上可查看各选项区别与建议")
         tip_enc.setObjectName("faintlabel")
-        tip_enc.setContentsMargins(70, 0, 0, 4)
+        tip_enc.setContentsMargins(80, 0, 0, 4)
         self.sec_enc.body_layout.addWidget(tip_enc)
         root.addWidget(self.sec_enc)
 
         # ---------- 音频 ----------
         self.sec_aud = Section("音频")
         r = QHBoxLayout()
-        r.addWidget(QLabel("主音轨"))
+        r.addWidget(mk_label("主音轨"))
         self.cmb_track = NoWheelComboBox()
         self.cmb_track.addItem("自动（英语优先，最高声道）")
-        r.addWidget(self.cmb_track, 3)
-        r.addWidget(QLabel("音频输出"))
+        self.cmb_track.setFixedWidth(300)
+        r.addWidget(self.cmb_track)
+        r.addWidget(mk_label("音频输出"))
         self.cmb_audio = NoWheelComboBox()
         self.cmb_audio.addItems([x[0] for x in AUDIO_MODES])
         self._set_combo(self.cmb_audio, self.cfg.get("audio", AUDIO_MODES[0][0]))
-        r.addWidget(self.cmb_audio, 2)
+        self.cmb_audio.setFixedWidth(190)
+        r.addWidget(self.cmb_audio)
         r.addStretch(1)
         self.sec_aud.body_layout.addLayout(r)
         r = QHBoxLayout()
-        r.addWidget(QLabel("字幕"))
+        r.addWidget(mk_label("字幕"))
         self.cmb_sub = NoWheelComboBox()
         self.cmb_sub.addItem("不整合字幕（默认）")
         self.cmb_sub.setToolTip(
@@ -2330,7 +2428,8 @@ class MainWindow(QWidget):
             "选择左眼文件后自动列出全部字幕轨（含语言标识）。\n"
             "提示：蓝光 3D 盘常有多条同语言字幕（正片版 / 不同画布版），\n"
             "整合后字幕大小与位置由播放器按视频尺寸渲染，建议多试几条选择显示效果最好的。")
-        r.addWidget(self.cmb_sub, 3)
+        self.cmb_sub.setFixedWidth(300)
+        r.addWidget(self.cmb_sub)
         self._sub_browse = QPushButton("浏览")
         self._sub_browse.setFixedWidth(64)
         self._sub_browse.setToolTip(
@@ -2345,32 +2444,32 @@ class MainWindow(QWidget):
             "外挂字幕一般与视频同目录（.sup / .pgs / .srt / .ass），选中左眼后自动探索，也可点「浏览」手动选择")
         tip_sub.setObjectName("faintlabel")
         tip_sub.setWordWrap(True)
-        tip_sub.setContentsMargins(70, 0, 0, 4)
+        tip_sub.setContentsMargins(80, 0, 0, 4)
         self.sec_aud.body_layout.addWidget(tip_sub)
         root.addWidget(self.sec_aud)
 
         # ---------- 高级 ----------
         self.sec_adv = Section("高级")
         r = QHBoxLayout()
-        r.addWidget(QLabel("关键帧间隔"))
+        r.addWidget(mk_label("关键帧间隔"))
         self.le_gop = QLineEdit(str(self.cfg.get("gop", 96)))
-        self.le_gop.setFixedWidth(60)
+        self.le_gop.setFixedWidth(100)
         r.addWidget(self.le_gop)
         r.addStretch(1)
         self.sec_adv.body_layout.addLayout(r)
 
         r = QHBoxLayout()
-        r.addWidget(QLabel("FFmpeg 版本"))
+        r.addWidget(mk_label("FFmpeg 版本"))
         self.cmb_ffver = NoWheelComboBox()
         self.cmb_ffver.addItems([x[0] for x in FFMPEG_VERSIONS])
         self._set_combo(self.cmb_ffver, self.cfg.get("ffver", FFMPEG_VERSIONS[0][0]))
-        self.cmb_ffver.setMinimumWidth(300)
+        self.cmb_ffver.setFixedWidth(300)
         r.addWidget(self.cmb_ffver)
         r.addStretch(1)
         self.sec_adv.body_layout.addLayout(r)
         tip2 = QLabel("N 卡 NVENC 报「驱动版本不满足」时，可切换兼容版 8.0 或改选其他编码器")
         tip2.setObjectName("faintlabel")
-        tip2.setContentsMargins(70, 0, 0, 4)
+        tip2.setContentsMargins(80, 0, 0, 4)
         self.sec_adv.body_layout.addWidget(tip2)
 
         r = QHBoxLayout()
@@ -2390,9 +2489,10 @@ class MainWindow(QWidget):
         self.sec_adv.body_layout.addLayout(r)
 
         r = QHBoxLayout()
-        r.addWidget(QLabel("限制帧数（调试）"))
+        r.addWidget(mk_label("限制帧数"))
         self.le_frames = QLineEdit("")
-        self.le_frames.setFixedWidth(80)
+        self.le_frames.setFixedWidth(100)
+        self.le_frames.setToolTip("调试用：仅编码前 N 帧（留空为不限制）")
         r.addWidget(self.le_frames)
         r.addStretch(1)
         self.sec_adv.body_layout.addLayout(r)
@@ -2548,7 +2648,7 @@ class MainWindow(QWidget):
     def _file_row(self, parent, label, le, browse_cmd, hint="", right_pad=0):
         row = QHBoxLayout()
         lb = QLabel(label)
-        lb.setFixedWidth(64)
+        lb.setFixedWidth(72)
         row.addWidget(lb)
         row.addWidget(le, 1)
         b = QPushButton("浏览")
@@ -2563,7 +2663,7 @@ class MainWindow(QWidget):
         parent.addLayout(row)
         h = QLabel(hint)
         h.setObjectName("faintlabel")
-        h.setContentsMargins(70, 0, 0, 4)
+        h.setContentsMargins(80, 0, 0, 4)
         parent.addWidget(h)
         return h
 
@@ -2598,7 +2698,7 @@ class MainWindow(QWidget):
 
     def _hms_box_set(self, boxes, sec):
         sec = int(max(sec, 0))
-        boxes[0].setText("%d" % (sec // 3600))
+        boxes[0].setText("%02d" % (sec // 3600))
         boxes[1].setText("%02d" % ((sec % 3600) // 60))
         boxes[2].setText("%02d" % (sec % 60))
 
@@ -2764,6 +2864,8 @@ class MainWindow(QWidget):
             self._apply_scrollbars()
         if getattr(self, "clip_slider", None) is not None:
             self.clip_slider.set_theme(self._theme)
+        if getattr(self, "chk_clip", None) is not None:
+            self.chk_clip.set_theme(self._theme)
         if getattr(self, "_dur_pair", (None, None)) != (None, None):
             self._apply_dur_check(*self._dur_pair)
 

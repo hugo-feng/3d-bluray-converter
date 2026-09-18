@@ -9,7 +9,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.0/3DBlurayConverter_v2.9.0_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.1/3DBlurayConverter_v2.9.1_portable.zip
 
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 
@@ -49,7 +49,7 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.0/3DBlur
 - **自动匹配右眼**：选择左眼后自动扫描同目录文件核对时长（过滤菜单 / 花絮小文件，
   按大小接近排序逐个校验），不要求文件编号相邻——例如 00098 → 00109 也能正确配对，
   全过程写入日志可核对依据
-- **片段转码（只转其中一段）**：独立开关（默认关闭，关闭时转换全片）；
+- **片段转码（只转其中一段）**：独立滑动开关（默认关闭，关闭时转换全片）；
   启用后拖动双端点滑块选择范围——区间内蓝色、区间外主题底色；
   端点时间分为「时 / 分 / 秒」三个输入框，支持鼠标拖动与精确输入；
   **解流阶段即只解出所选片段**（中间文件仅片段大小，耗时按片段大幅减小）；
