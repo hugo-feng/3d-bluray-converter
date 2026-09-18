@@ -9,7 +9,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.6.1/3DBlurayConverter_v2.6.1_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.7.0/3DBlurayConverter_v2.7.0_portable.zip
 
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 
@@ -49,6 +49,10 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.6.1/3DBlur
 - **自动匹配右眼**：选择左眼后自动扫描同目录文件核对时长（过滤菜单 / 花絮小文件，
   按大小接近排序逐个校验），不要求文件编号相邻——例如 00098 → 00109 也能正确配对，
   全过程写入日志可核对依据
+- **整合字幕**：选择左眼后**自动探测源盘全部内嵌字幕**（PGS 图形字幕，含语言标识）
+  与**外挂字幕文件**（同目录 / BDMV 常见位置的 .sup / .pgs / .srt / .ass），
+  可在下拉中选择一条整合进成品；也可点「浏览」**手动选择字幕文件**（保底方式）；
+  蓝光原盘的字幕内嵌在 `BDMV\STREAM\*.m2ts`，界面内附有位置提示
 - **完成统计与日志**：**点击开始转换即创建日志文件**，全部过程**实时同步写入**
   （软件目录 `log\`）；无论成功、失败还是取消都完整保留，便于排查；
   完成后弹窗展示各阶段耗时与源文件 / 成品 / 中间文件大小

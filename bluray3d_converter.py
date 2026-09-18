@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.6.1"
+APP_VERSION = "v2.7.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -731,6 +731,121 @@ def probe_audio_tracks(m2ts):
     return tracks
 
 
+def probe_subtitle_tracks(m2ts):
+    """用 tsMuxeR 读头探测内嵌 PGS 字幕轨（蓝光盘的完整语言信息优于 ffprobe）。
+
+    返回 [(pos, label, lang), ...]；pos 为 ffmpeg 字幕流序号（与 PGS 排列顺序一致）。
+    """
+    try:
+        p = run_hidden([TSMUXER, m2ts], timeout=30)
+        out = (p.stdout or "") + (p.stderr or "")
+    except Exception:
+        return []
+    raw = []
+    cur = {}
+    for ln in out.splitlines():
+        ln = ln.strip()
+        m = re.match(r"Track ID:\s*(\d+)", ln)
+        if m:
+            if cur.get("type") == "PGS":
+                raw.append(cur)
+            cur = {"pid": int(m.group(1))}
+            continue
+        if "pid" not in cur:
+            continue
+        m = re.match(r"Stream type:\s*(.+)", ln)
+        if m:
+            cur["type"] = m.group(1).strip().upper()
+            continue
+        m = re.match(r"Stream info:\s*(.+)", ln)
+        if m:
+            cur["info"] = m.group(1).strip()
+            continue
+        m = re.match(r"Stream lang:\s*(.*)", ln)
+        if m:
+            cur["lang"] = m.group(1).strip()
+    if cur.get("type") == "PGS":
+        raw.append(cur)
+    tracks = []
+    for pos, t in enumerate(raw):
+        lang = t.get("lang") or "und"
+        name = SUB_LANG_NAMES.get(lang, lang)
+        extra = ""
+        m = re.search(r"Resolution:\s*(\d+):(\d+)", t.get("info", ""))
+        if m:
+            extra = "（%s×%s）" % (m.group(1), m.group(2))
+        tracks.append((pos, "#%d %s PGS%s" % (pos + 1, name, extra), lang))
+    return tracks
+
+
+SUB_LANG_NAMES = {
+    "eng": "英语", "zho": "中文", "chi": "中文", "fra": "法语", "fre": "法语",
+    "deu": "德语", "ger": "德语", "jpn": "日语", "kor": "韩语",
+    "spa": "西班牙语", "por": "葡萄牙语", "tha": "泰语", "rus": "俄语",
+    "ita": "意大利语", "nld": "荷兰语", "swe": "瑞典语", "und": "未标注",
+}
+
+SUB_EXTS = (".sup", ".pgs", ".srt", ".ass", ".ssa")
+
+
+def guess_sub_lang(name):
+    """从字幕文件名猜测语言代码"""
+    n = name.lower()
+    if re.search(r"(cht|big5|zh-tw|traditional|繁)", n):
+        return "zho"
+    if re.search(r"(chs|gb|zh-cn|simplified|简|zh)", n):
+        return "zho"
+    if re.search(r"(eng|english|\.en\b|_en\b)", n):
+        return "eng"
+    if re.search(r"(jpn|jap|jp|日)", n):
+        return "jpn"
+    if re.search(r"(kor|kr|韩)", n):
+        return "kor"
+    return "und"
+
+
+def find_external_subs(left_path):
+    """自动探索外挂字幕文件：扫描左眼目录、BDMV 上级目录、盘根与常见字幕子目录。
+
+    返回 [(path, label)]（.sup / .pgs / .srt / .ass / .ssa）。
+    注：蓝光原盘的字幕大多内嵌在 m2ts 中（PGS），外挂文件是补充来源。
+    """
+    base = os.path.dirname(os.path.abspath(left_path))
+    up1 = os.path.dirname(base)
+    up2 = os.path.dirname(up1)
+    dirs = [base, up1, up2]
+    for extra in ("Subs", "subs", "Sub", "sub", "字幕", "subtitles",
+                  "Subtitles", "Subtitle"):
+        dirs.append(os.path.join(up1, extra))
+        dirs.append(os.path.join(base, extra))
+    seen = set()
+    found = []
+    for d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        key = os.path.normcase(d)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for f in names:
+            if not f.lower().endswith(SUB_EXTS):
+                continue
+            p = os.path.join(d, f)
+            try:
+                if os.path.getsize(p) <= 0:
+                    continue
+            except OSError:
+                continue
+            lang = guess_sub_lang(f)
+            found.append((p, "外挂：%s（%s）" % (
+                f, SUB_LANG_NAMES.get(lang, lang))))
+    return found
+
+
 class ConvertJob(threading.Thread):
     """单个片段的完整转换任务（解流 -> 视频编码 -> 音频提取 -> 混流）"""
 
@@ -738,7 +853,7 @@ class ConvertJob(threading.Thread):
                  container="mkv", encoder="amf", rc="cqp", qp=18, bitrate=20,
                  speed="quality", gop=96, audio_mode="dual", audio_track=None,
                  open_after=False, max_frames=0, skip_demux=False, ffmpeg=None,
-                 reuse_video=False,
+                 reuse_video=False, subtitle=None,
                  on_log=None, on_progress=None, on_done=None, on_error=None):
         super().__init__(daemon=True)
         self.left_file = left_file
@@ -754,6 +869,7 @@ class ConvertJob(threading.Thread):
         self.gop = gop
         self.audio_mode = audio_mode
         self.audio_track = audio_track
+        self.subtitle = subtitle or None
         self.open_after = open_after
         self.max_frames = max_frames
         self.skip_demux = skip_demux
@@ -1178,6 +1294,8 @@ class ConvertJob(threading.Thread):
 
         # ---- 阶段 2B：提取音频到独立文件（顺序 I/O）----
         if self.audio_mode == "none" or not audio_src:
+            if self.subtitle:
+                self._log("提示：无音轨模式下不支持字幕整合，本次未整合字幕")
             if os.path.exists(self.out_file):
                 os.remove(self.out_file)
             os.replace(tmp_video, self.out_file)
@@ -1186,6 +1304,41 @@ class ConvertJob(threading.Thread):
             return
         dur = total * 1001.0 / 24000.0 + 0.2
         is_mp4 = self.container == "mp4"
+        # ---- 阶段 2B-1：提取内嵌 PGS 字幕（若已选择）----
+        sub_file = None
+        if self.subtitle:
+            kind, sval, slang = self.subtitle
+            if is_mp4:
+                self._log("提示：MP4 容器不支持 PGS 字幕，本次未整合字幕")
+            elif kind == "f":
+                if os.path.exists(sval):
+                    sub_file = sval
+                    self._log("使用外挂字幕文件：%s" % sval)
+                else:
+                    self._log("字幕文件不存在，本次未整合字幕：%s" % sval)
+            else:
+                self._log("提取内嵌字幕（PGS #%d，%s）..." % (sval + 1, slang))
+                sub_path = os.path.join(self.workdir, "subtitle.sup")
+                cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats",
+                       "-i", audio_src, "-map", "0:s:%d" % sval,
+                       "-c", "copy", sub_path]
+                p = popen_hidden(cmd)
+                self.proc = p
+                for line in p.stdout:
+                    self._check()
+                    if "=" not in line and line.strip():
+                        self._log("  ffmpeg: " + line.strip())
+                p.wait()
+                self.proc = None
+                self._check()
+                if p.returncode == 0 and os.path.exists(sub_path) \
+                        and os.path.getsize(sub_path) > 0:
+                    sub_file = sub_path
+                    self._log("字幕提取完成：%s" % fmt_size(
+                        os.path.getsize(sub_path)))
+                else:
+                    self._log("字幕提取失败（返回码 %s），本次未整合字幕"
+                              % p.returncode)
         extract_jobs = []
         if self.audio_mode in ("dual", "copy"):
             extract_jobs.append((os.path.join(self.workdir, "audio_main.mka"),
@@ -1244,6 +1397,9 @@ class ConvertJob(threading.Thread):
         cmd += ["-map", "0:v"]
         for i in range(len(audio_files)):
             cmd += ["-map", "%d:a" % (i + 1)]
+        if sub_file is not None:
+            cmd += ["-i", sub_file]
+            cmd += ["-map", "%d:s" % (1 + len(audio_files))]
         cmd += ["-c", "copy"]
         if len(audio_files) >= 1:
             cmd += ["-metadata:s:a:0", "language=eng",
@@ -1251,6 +1407,12 @@ class ConvertJob(threading.Thread):
         if len(audio_files) >= 2:
             cmd += ["-metadata:s:a:1", "language=eng",
                     "-metadata:s:a:1", "title=AAC 5.1"]
+        if sub_file is not None:
+            _slang = "und"
+            if isinstance(self.subtitle, (tuple, list)) and len(self.subtitle) >= 3:
+                _slang = self.subtitle[2] or "und"
+            cmd += ["-metadata:s:s:0", "language=%s" % _slang,
+                    "-metadata:s:s:0", "title=Subtitle"]
         if is_mp4:
             cmd += ["-f", "mp4", "-tag:v", "hvc1", "-movflags", "+faststart"]
         else:
@@ -1486,6 +1648,7 @@ class Bridge(QObject):
     dur_check = Signal(object, object)
     right_match = Signal(object)
     tracks = Signal(object)
+    subs = Signal(object)
     gpu_info = Signal(object)
 
 
@@ -1719,6 +1882,7 @@ class MainWindow(QWidget):
         self._encoder_touched = False
         self._enc_user_fixed = bool(self.cfg.get("encoder_touched", False))
         self.audio_tracks = []
+        self.subtitle_tracks = []
         self._concat_running = False
         self._concat_procs = []
         self.bridge = Bridge()
@@ -1732,6 +1896,7 @@ class MainWindow(QWidget):
         self.bridge.dur_check.connect(self._apply_dur_check)
         self.bridge.right_match.connect(self._apply_right_match)
         self.bridge.tracks.connect(self._apply_tracks)
+        self.bridge.subs.connect(self._apply_subs)
         self.bridge.gpu_info.connect(self._apply_gpu_info)
 
         self.setWindowTitle(APP_TITLE)
@@ -1797,7 +1962,7 @@ class MainWindow(QWidget):
         cv.setSpacing(6)
         self.le_left = QLineEdit(self.cfg.get("left", ""))
         self.le_right = QLineEdit(self.cfg.get("right", ""))
-        self.le_out = QLineEdit(self.cfg.get("out", ""))
+        self.le_out = QLineEdit("")  # 输出路径默认留空，由用户显式选择
         self._file_row(cv, "左眼文件", self.le_left, self.pick_left,
                        "BDMV\\STREAM 内的主视频流（如 00000.m2ts）")
         self._file_row(cv, "右眼文件", self.le_right, self.pick_right,
@@ -1897,6 +2062,32 @@ class MainWindow(QWidget):
         r.addWidget(self.cmb_audio, 2)
         r.addStretch(1)
         self.sec_aud.body_layout.addLayout(r)
+        r = QHBoxLayout()
+        r.addWidget(QLabel("字幕"))
+        self.cmb_sub = NoWheelComboBox()
+        self.cmb_sub.addItem("不整合字幕（默认）")
+        self.cmb_sub.setToolTip(
+            "从源盘内嵌的 PGS 字幕中选择一条整合进成品（仅 MKV 容器支持）。\n"
+            "选择左眼文件后自动列出全部字幕轨（含语言标识）。\n"
+            "提示：蓝光 3D 盘常有多条同语言字幕（正片版 / 不同画布版），\n"
+            "整合后字幕大小与位置由播放器按视频尺寸渲染，建议多试几条选择显示效果最好的。")
+        r.addWidget(self.cmb_sub, 3)
+        self._sub_browse = QPushButton("浏览")
+        self._sub_browse.setFixedWidth(64)
+        self._sub_browse.setToolTip(
+            "手动选择外挂字幕文件（.sup / .pgs / .srt / .ass / .ssa）\n"
+            "作为自动探索失败时的保底方式")
+        self._sub_browse.clicked.connect(self._pick_sub_file)
+        r.addWidget(self._sub_browse)
+        r.addStretch(1)
+        self.sec_aud.body_layout.addLayout(r)
+        tip_sub = QLabel(
+            "蓝光原盘的字幕内嵌在 BDMV\\STREAM\\*.m2ts（PGS 图形字幕，已自动列出）；"
+            "外挂字幕一般与视频同目录（.sup / .pgs / .srt / .ass），选中左眼后自动探索，也可点「浏览」手动选择")
+        tip_sub.setObjectName("faintlabel")
+        tip_sub.setWordWrap(True)
+        tip_sub.setContentsMargins(70, 0, 0, 4)
+        self.sec_aud.body_layout.addWidget(tip_sub)
         root.addWidget(self.sec_aud)
 
         # ---------- 高级 ----------
@@ -2051,7 +2242,8 @@ class MainWindow(QWidget):
 
         # 联动摘要
         for cb in (self.cmb_layout, self.cmb_container, self.cmb_encoder,
-                   self.cmb_speed, self.cmb_qp, self.cmb_audio, self.cmb_ffver):
+                   self.cmb_speed, self.cmb_qp, self.cmb_audio, self.cmb_sub,
+                   self.cmb_ffver):
             cb.currentTextChanged.connect(lambda _=None: self._refresh_summaries())
         self.cmb_rc.currentTextChanged.connect(self._on_rc_change)
         self.le_gop.textChanged.connect(lambda _=None: self._refresh_summaries())
@@ -2229,7 +2421,12 @@ class MainWindow(QWidget):
         self.sec_enc.set_summary("%s · %s · %s" % (
             enc, self.cmb_qp.currentText().split("（")[0],
             self.cmb_speed.currentText()))
-        self.sec_aud.set_summary("自动 · %s" % self.cmb_audio.currentText().split("（")[0])
+        self.sec_aud.set_summary(
+            "自动 · %s%s" % (
+                self.cmb_audio.currentText().split("（")[0],
+                " · 整合字幕" if getattr(self, "subtitle_tracks", None)
+                and getattr(self, "cmb_sub", None) is not None
+                and self.cmb_sub.currentIndex() > 0 else ""))
         self.sec_adv.set_summary("GOP %s%s · FFmpeg %s%s" % (
             self.le_gop.text(),
             " · 完成后打开" if self.chk_open.isChecked() else "",
@@ -2470,10 +2667,6 @@ class MainWindow(QWidget):
         if p:
             self.le_left.setText(p)
             self.le_right.clear()
-            if not self.le_out.text():
-                base = os.path.splitext(os.path.basename(p))[0]
-                self.le_out.setText(os.path.join(os.path.dirname(p), "..",
-                                                 "..", "..", "sbs_" + base + ".mkv"))
             self._auto_match_right(p)
             self._refresh_tracks(p)
 
@@ -2610,6 +2803,9 @@ class MainWindow(QWidget):
             tracks = probe_audio_tracks(m2ts)
             if tracks:
                 self.bridge.tracks.emit(tracks)
+            embedded = probe_subtitle_tracks(m2ts)
+            external = find_external_subs(m2ts)
+            self.bridge.subs.emit((embedded, external))
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_tracks(self, tracks):
@@ -2619,6 +2815,44 @@ class MainWindow(QWidget):
         for t in tracks:
             self.cmb_track.addItem(t[1])
         self._log("检测到 %d 条音轨" % len(tracks))
+
+    def _apply_subs(self, payload):
+        """填充字幕下拉：内嵌 PGS（自动探测）+ 外挂字幕文件（自动探索）"""
+        embedded, external = payload or ((), ())
+        self.subtitle_tracks = []
+        self.cmb_sub.clear()
+        self.cmb_sub.addItem("不整合字幕（默认）")
+        for pos, label, lang in embedded or ():
+            self.subtitle_tracks.append(("e", pos, lang, label))
+            self.cmb_sub.addItem(label)
+        for path, label in external or ():
+            lang = guess_sub_lang(os.path.basename(path))
+            self.subtitle_tracks.append(("f", path, lang, label))
+            self.cmb_sub.addItem(label)
+        if self.subtitle_tracks:
+            self._log("检测到 %d 条可选字幕（内嵌 %d 条 + 外挂 %d 条）"
+                      % (len(self.subtitle_tracks), len(embedded or ()),
+                         len(external or ())))
+        else:
+            self._log("未检测到内嵌字幕，也未找到外挂字幕文件"
+                      "（可点「浏览」手动选择字幕文件）")
+        self._refresh_summaries()
+
+    def _pick_sub_file(self):
+        """手动选择外挂字幕文件（自动探索失败时的保底）"""
+        p, _ = QFileDialog.getOpenFileName(
+            self, "选择字幕文件（PGS / SRT / ASS）",
+            os.path.dirname(self.le_left.text()) or "",
+            "字幕文件 (*.sup *.pgs *.srt *.ass *.ssa);;所有文件 (*)")
+        if not p:
+            return
+        lang = guess_sub_lang(os.path.basename(p))
+        label = "外挂：%s（%s）" % (os.path.basename(p),
+                                   SUB_LANG_NAMES.get(lang, lang))
+        self.subtitle_tracks.append(("f", p, lang, label))
+        self.cmb_sub.addItem(label)
+        self.cmb_sub.setCurrentIndex(self.cmb_sub.count() - 1)
+        self._log("已手动选择字幕文件：%s" % p)
 
     # ---------- 运行 ----------
     def _log(self, s):
@@ -2978,6 +3212,12 @@ class MainWindow(QWidget):
             pos = self.cmb_track.currentIndex() - 1
             if 0 <= pos < len(self.audio_tracks):
                 audio_track = self.audio_tracks[pos][0]
+        subtitle = None
+        if self.subtitle_tracks and self.cmb_sub.currentIndex() > 0:
+            spos = self.cmb_sub.currentIndex() - 1
+            if 0 <= spos < len(self.subtitle_tracks):
+                t = self.subtitle_tracks[spos]
+                subtitle = (t[0], t[1], t[2])  # (来源, 值, 语言)
         # FFmpeg 版本解析（自动：按 NVIDIA 驱动版本匹配）
         ffver_mode = self._sel(FFMPEG_VERSIONS, self.cmb_ffver.currentText(), "auto")
         drv, drv_raw = self._nv_driver
@@ -3049,6 +3289,10 @@ class MainWindow(QWidget):
         else:
             self._log("主音轨：自动（英语优先，最高声道）")
         self._log("音频输出：%s" % self.cmb_audio.currentText())
+        if subtitle:
+            self._log("整合字幕：%s（PGS）" % self.cmb_sub.currentText())
+        else:
+            self._log("整合字幕：无")
         if max_frames:
             self._log("限制帧数：%d（调试模式）" % max_frames)
         self._log("完成后打开目录：%s" % ("是" if self.chk_open.isChecked() else "否"))
@@ -3064,6 +3308,7 @@ class MainWindow(QWidget):
             qp=qp, bitrate=bitrate,
             speed=self._sel(SPEEDS, self.cmb_speed.currentText(), "quality"),
             gop=gop, audio_mode=audio_mode, audio_track=audio_track,
+            subtitle=subtitle,
             open_after=self.chk_open.isChecked(), max_frames=max_frames,
             on_log=lambda s: self.bridge.log.emit(s),
             on_progress=lambda st, pct, info, rem=-1.0:
@@ -3161,9 +3406,9 @@ class MainWindow(QWidget):
         ws = [self.le_left, self.le_right, self.le_out, self.cmb_layout,
               self.cmb_container, self.cmb_encoder, self.cmb_speed,
               self.cmb_rc, self.cmb_qp, self.le_bitrate, self.cmb_track,
-              self.cmb_audio, self.le_gop, self.cmb_ffver, self.chk_open,
-              self.chk_reuse, self.le_frames, self.le_cat_out,
-              self.btn_seg_add, self.btn_concat_run]
+              self.cmb_audio, self.cmb_sub, self._sub_browse, self.le_gop,
+              self.cmb_ffver, self.chk_open, self.chk_reuse, self.le_frames,
+              self.le_cat_out, self.btn_seg_add, self.btn_concat_run]
         for le in (self.le_left, self.le_right, self.le_out, self.le_cat_out):
             b = getattr(le, "_browse_btn", None)
             if b is not None:
@@ -3328,6 +3573,17 @@ def main():
         noaudio = "--noaudio" in args
         skipdemux = "--skipdemux" in args
         reuse_video = "--reuse" in args
+        subtitle_arg = None
+        sub_sel = get("--sub")
+        if sub_sel is not None:
+            subs = probe_subtitle_tracks(left)
+            si = max(1, int(sub_sel)) - 1
+            if si < len(subs):
+                subtitle_arg = ("e", subs[si][0], subs[si][2])
+        sub_file_arg = get("--subfile")
+        if sub_file_arg:
+            subtitle_arg = ("f", sub_file_arg,
+                            guess_sub_lang(os.path.basename(sub_file_arg)))
         qidx = int(get("--quality", "0") or 0)
         qp = QP_LEVELS[max(0, min(qidx, len(QP_LEVELS) - 1))][1]
         if not left or not right or not out:
@@ -3335,7 +3591,8 @@ def main():
                   "--out x.mkv [--layout full_sbs|half_sbs|full_tab|half_tab] "
                   "[--container mkv|mp4] [--encoder amf|nvenc|qsv|cpu] [--quality 0-3] "
                   "[--ffver master|8.0] "
-                  "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux] [--reuse]")
+                  "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux] [--reuse] "
+                  "[--sub N（整合第 N 条内嵌字幕）| --subfile 字幕文件路径]")
             return 1
         job = ConvertJob(
             left, right, out,
@@ -3346,6 +3603,7 @@ def main():
             bitrate=int(get("--bitrate", "20") or 20),
             qp=qp,
             audio_mode=("none" if noaudio else "dual"),
+            subtitle=subtitle_arg,
             max_frames=frames, skip_demux=skipdemux, reuse_video=reuse_video,
             on_log=lambda s: print(s, flush=True),
             on_progress=lambda st, pct, info, rem=-1.0: print(
