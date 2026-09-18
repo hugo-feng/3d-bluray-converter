@@ -564,9 +564,10 @@ def make_msgbox(parent, icon, text, buttons, default_button=None):
 
 
 def mk_label(text, width=72):
-    """统一样式：固定宽度标签（保证各行左对齐）"""
+    """统一样式：固定宽度标签（文字居中，保证各行标签列对齐且不与控件脱开）"""
     lb = QLabel(text)
     lb.setFixedWidth(width)
+    lb.setAlignment(Qt.AlignCenter)
     return lb
 
 
@@ -968,7 +969,9 @@ class ConvertJob(threading.Thread):
             self._log("复用模式：未找到可沿用的中间目录"
                       "（首次运行 / 输出路径或片段范围已变化），将完整执行")
         ts = time.strftime("%Y%m%d_%H%M%S")
-        ascii_name = re.sub(r"[^A-Za-z0-9_.-]", "_", out_name) or "output"
+        ascii_name = re.sub(r"[^A-Za-z0-9_.-]", "_", out_name)
+        if not re.search(r"[A-Za-z0-9]", ascii_name):
+            ascii_name = "output"
         preferred = os.path.join(out_dir,
                                  "_bd3d_work_%s_%s" % (ts, out_name))
         path = ascii_workdir(preferred, ascii_name)
@@ -2385,6 +2388,16 @@ class MainWindow(QWidget):
             "拖动两端手柄设置片段：区间内（蓝色）将被转换，区间外不转换；\n"
             "也可在输入框精确输入时间（时:分:秒）")
         self.sec_clip.body_layout.addWidget(self.clip_slider)
+        r = QHBoxLayout()
+        r.setContentsMargins(9, 0, 9, 0)
+        self.lbl_clip_min = QLabel("00:00:00")
+        self.lbl_clip_min.setObjectName("faintlabel")
+        r.addWidget(self.lbl_clip_min)
+        r.addStretch(1)
+        self.lbl_clip_max = QLabel("00:00:00")
+        self.lbl_clip_max.setObjectName("faintlabel")
+        r.addWidget(self.lbl_clip_max)
+        self.sec_clip.body_layout.addLayout(r)
         self.lbl_clip_info = QLabel("选择左眼文件后可设置片段范围")
         self.lbl_clip_info.setObjectName("faintlabel")
         self.lbl_clip_info.setContentsMargins(80, 0, 0, 4)
@@ -2775,6 +2788,9 @@ class MainWindow(QWidget):
                 + list(getattr(self, "clip_hi_boxes", [])):
             b.setEnabled(use)
         self.btn_clip_full.setEnabled(use)
+        if getattr(self, "lbl_clip_max", None) is not None:
+            self.lbl_clip_max.setText(fmt_hms(total) if total > 0
+                                      else "00:00:00")
         if not self._clip_enabled():
             self.lbl_clip_info.setText(
                 "未启用：转换全片（勾选上方开关后启用片段范围）")
