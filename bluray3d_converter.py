@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.7.0"
+APP_VERSION = "v2.8.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -853,7 +853,7 @@ class ConvertJob(threading.Thread):
                  container="mkv", encoder="amf", rc="cqp", qp=18, bitrate=20,
                  speed="quality", gop=96, audio_mode="dual", audio_track=None,
                  open_after=False, max_frames=0, skip_demux=False, ffmpeg=None,
-                 reuse_video=False, subtitle=None,
+                 reuse_video=False, subtitle=None, clip=None,
                  on_log=None, on_progress=None, on_done=None, on_error=None):
         super().__init__(daemon=True)
         self.left_file = left_file
@@ -870,6 +870,7 @@ class ConvertJob(threading.Thread):
         self.audio_mode = audio_mode
         self.audio_track = audio_track
         self.subtitle = subtitle or None
+        self.clip = clip or None
         self.open_after = open_after
         self.max_frames = max_frames
         self.skip_demux = skip_demux
@@ -1184,7 +1185,7 @@ class ConvertJob(threading.Thread):
         return self.left_file, (idx if idx is not None else 0)
 
     # ---------- 阶段 2：编码 ----------
-    def _build_avs(self, base, dep, nframes, total):
+    def _build_avs(self, base, dep, nframes, total, f0=0):
         if self.layout == "full_sbs":
             tail = "StackHorizontal(left, right)\n"
         elif self.layout == "half_sbs":
@@ -1199,7 +1200,9 @@ class ConvertJob(threading.Thread):
                'left  = SelectEven(interleaved)\n'
                'right = SelectOdd(interleaved)\n'
                '%s' % (safe_plugin_path(FRIMSOURCE), base, dep, nframes, tail))
-        if self.max_frames:
+        if self.clip:
+            avs += "Trim(%d, %d)\n" % (f0, f0 + total - 1)
+        elif self.max_frames:
             avs += "Trim(0, %d)\n" % (total - 1)
         return avs
 
@@ -1209,11 +1212,37 @@ class ConvertJob(threading.Thread):
 
     def _encode(self, base, dep, nframes, audio_src, audio_idx, audio_codec):
         total = nframes
+        f0 = 0
+        if self.clip:
+            f0 = max(int(round(self.clip[0] * 24000.0 / 1001.0)), 0)
+            f1 = max(int(round(self.clip[1] * 24000.0 / 1001.0)), f0 + 1)
+            total = f1 - f0
+            self._log("片段裁剪：%s ~ %s（约 %d 帧）"
+                      % (fmt_hms(self.clip[0]), fmt_hms(self.clip[1]),
+                         min(total, nframes)))
+            total = min(total, max(nframes, 1))
         if self.max_frames:
-            total = min(nframes, self.max_frames)
+            total = min(total, self.max_frames)
         # ---- 阶段 2A：编码纯视频（可复用上次已完成的编码结果）----
         tmp_video = os.path.join(self.workdir, "video_only.mkv")
-        reuse = (self.reuse_video and os.path.exists(tmp_video)
+        clip_key = ("%.3f,%.3f" % (self.clip[0], self.clip[1])) if self.clip else ""
+        marker = os.path.join(self.workdir, "clip.marker")
+        try:
+            old_key = ""
+            if os.path.exists(marker):
+                with open(marker, encoding="utf-8") as mf:
+                    old_key = mf.read().strip()
+        except OSError:
+            old_key = ""
+        clip_match = (old_key == clip_key)
+        if self.clip and not clip_match:
+            self._log("片段范围已变化：不复用之前的完整片编码结果")
+        try:
+            with open(marker, "w", encoding="utf-8") as mf:
+                mf.write(clip_key)
+        except OSError:
+            pass
+        reuse = (self.reuse_video and clip_match and os.path.exists(tmp_video)
                  and os.path.getsize(tmp_video) > 50 * 1024 * 1024)
         if reuse:
             self._log("复用已完成的编码结果（video_only.mkv，%.1f GB），跳过视频编码阶段"
@@ -1228,7 +1257,7 @@ class ConvertJob(threading.Thread):
             t_enc = time.time()
             avs_path = os.path.join(self.workdir, "decode.avs")
             with open(avs_path, "w", encoding="utf-8") as f:
-                f.write(self._build_avs(base, dep, nframes, total))
+                f.write(self._build_avs(base, dep, nframes, total, f0))
 
             # ---- 阶段 2A：编码纯视频 ----
             tmp_video = os.path.join(self.workdir, "video_only.mkv")
@@ -1319,7 +1348,10 @@ class ConvertJob(threading.Thread):
             else:
                 self._log("提取内嵌字幕（PGS #%d，%s）..." % (sval + 1, slang))
                 sub_path = os.path.join(self.workdir, "subtitle.sup")
+                _c0 = self.clip[0] if self.clip else 0.0
+                _sub_dur = (self.clip[1] - self.clip[0]) if self.clip else dur
                 cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats",
+                       "-ss", "%.3f" % _c0, "-t", "%.3f" % max(_sub_dur, 1.0),
                        "-i", audio_src, "-map", "0:s:%d" % sval,
                        "-c", "copy", sub_path]
                 p = popen_hidden(cmd)
@@ -1353,8 +1385,9 @@ class ConvertJob(threading.Thread):
             mode_txt = {"copy": "原样直通", "flac": "无损转 FLAC",
                         "ac3": "转码 AC3", "aac": "转码 AAC"}.get(aopts[1], aopts[1])
             self._log("提取音频 %d/%d（%s）..." % (ai + 1, len(extract_jobs), mode_txt))
+            _c0 = self.clip[0] if self.clip else 0.0
             cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
-                   "-t", "%.3f" % dur, "-i", audio_src,
+                   "-ss", "%.3f" % _c0, "-t", "%.3f" % dur, "-i", audio_src,
                    "-map", "0:a:%d" % audio_idx] + aopts + [apath]
             p = popen_hidden(cmd)
             self.proc = p
@@ -1697,6 +1730,157 @@ class SlimProgress(QWidget):
             p.drawRoundedRect(chunk, radius, radius)
 
 
+def parse_hms(text):
+    """解析时间输入（HH:MM:SS / MM:SS / 秒数）→ 秒；失败返回 None"""
+    t = (text or "").strip()
+    if not t:
+        return None
+    try:
+        if ":" in t:
+            parts = [p.strip() for p in t.split(":")]
+            if len(parts) == 2:
+                h, m, s = 0, int(parts[0]), float(parts[1])
+            elif len(parts) == 3:
+                h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+            else:
+                return None
+            return max(h * 3600 + m * 60 + s, 0.0)
+        return max(float(t), 0.0)
+    except ValueError:
+        return None
+
+
+def fmt_hms(sec):
+    """秒 → HH:MM:SS"""
+    sec = int(max(sec, 0))
+    return "%02d:%02d:%02d" % (sec // 3600, (sec % 3600) // 60, sec % 60)
+
+
+class RangeSlider(QWidget):
+    """双端点范围滑块（自绘）：区间内蓝色、区间外主题底色，两端手柄可拖动"""
+
+    range_changed = Signal(float, float)  # (lo, hi) 0..1000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lo = 0.0
+        self._hi = 1000.0
+        self._theme = "dark"
+        self._drag = None
+        self._hover = None
+        self.setFixedHeight(30)
+        self.setMinimumWidth(240)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setCursor(Qt.PointingHandCursor)
+
+    # ---- 数据 ----
+    def values(self):
+        return self._lo, self._hi
+
+    def set_values(self, lo, hi, emit=False):
+        lo = max(0.0, min(float(lo), 1000.0))
+        hi = max(0.0, min(float(hi), 1000.0))
+        if hi < lo:
+            lo, hi = hi, lo
+        changed = (lo != self._lo) or (hi != self._hi)
+        self._lo, self._hi = lo, hi
+        self.update()
+        if changed and emit:
+            self.range_changed.emit(self._lo, self._hi)
+
+    def set_theme(self, theme):
+        self._theme = theme
+        self.update()
+
+    # ---- 几何 ----
+    def _pad(self):
+        return 9.0
+
+    def _x_of(self, v):
+        pad = self._pad()
+        w = max(self.width() - 2 * pad, 1.0)
+        return pad + w * (v / 1000.0)
+
+    def _val_of(self, x):
+        pad = self._pad()
+        w = max(self.width() - 2 * pad, 1.0)
+        return max(0.0, min((x - pad) / w * 1000.0, 1000.0))
+
+    # ---- 绘制 ----
+    def paintEvent(self, _event):
+        c = THEMES.get(self._theme, THEMES["dark"])
+        if self._theme == "light":
+            groove, edge = "#e6e6ea", "#d0d0d6"
+        else:
+            groove, edge = "#26272e", "#3a3c44"
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        h = 8.0
+        y = (self.height() - h) / 2.0
+        x0, x1 = self._x_of(0), self._x_of(1000)
+        xa, xb = self._x_of(self._lo), self._x_of(self._hi)
+        r = h / 2.0
+        p.setPen(QPen(QColor(edge), 1))
+        p.setBrush(QColor(groove))
+        p.drawRoundedRect(QRectF(x0, y, x1 - x0, h), r, r)
+        if xb - xa > 0.6:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(c["accent"]))
+            p.drawRoundedRect(QRectF(xa, y, max(xb - xa, h), h), r, r)
+        for x, key in ((xa, "lo"), (xb, "hi")):
+            active = (self._drag == key) or (self._hover == key)
+            rad = 7.0 if not active else 8.0
+            cy = self.height() / 2.0
+            p.setPen(QPen(QColor("#ffffff" if self._theme == "dark"
+                                 else "#ffffff"), 2))
+            p.setBrush(QColor(c["accent"]))
+            p.drawEllipse(QRectF(x - rad, cy - rad, rad * 2, rad * 2))
+
+    # ---- 交互 ----
+    def _hit(self, pos):
+        x = pos.x()
+        d_lo = abs(x - self._x_of(self._lo))
+        d_hi = abs(x - self._x_of(self._hi))
+        if min(d_lo, d_hi) <= 12:
+            return "lo" if d_lo <= d_hi else "hi"
+        v = self._val_of(x)
+        return "lo" if abs(v - self._lo) < abs(v - self._hi) else "hi"
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag = self._hit(event.position())
+            self._apply_drag(event.position())
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        pos = event.position()
+        if self._drag:
+            self._apply_drag(pos)
+        else:
+            h = self._hit(pos)
+            if h != self._hover:
+                self._hover = h
+                self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag = None
+        self.update()
+        event.accept()
+
+    def leaveEvent(self, event):
+        self._hover = None
+        self.update()
+        super().leaveEvent(event)
+
+    def _apply_drag(self, pos):
+        v = self._val_of(pos.x())
+        if self._drag == "lo":
+            self.set_values(min(v, self._hi - 2.0), self._hi, emit=True)
+        else:
+            self.set_values(self._lo, max(v, self._lo + 2.0), emit=True)
+
+
 class SmoothScrollArea(QScrollArea):
     """平滑滚动区：滚轮按动画过渡，避免一格格跳变"""
 
@@ -1989,6 +2173,37 @@ class MainWindow(QWidget):
         self.sec_fmt.body_layout.addLayout(r)
         root.addWidget(self.sec_fmt)
 
+        # ---------- 片段范围（只转换指定区间） ----------
+        self.sec_clip = Section("片段范围（可选：只转换其中一段）")
+        r = QHBoxLayout()
+        r.addWidget(QLabel("起点"))
+        self.le_clip_lo = QLineEdit("00:00:00")
+        self.le_clip_lo.setFixedWidth(96)
+        self.le_clip_lo.setToolTip("片段起点，支持 HH:MM:SS 或 MM:SS，回车确认")
+        r.addWidget(self.le_clip_lo)
+        r.addWidget(QLabel("终点"))
+        self.le_clip_hi = QLineEdit("00:00:00")
+        self.le_clip_hi.setFixedWidth(96)
+        self.le_clip_hi.setToolTip("片段终点，支持 HH:MM:SS 或 MM:SS，回车确认")
+        r.addWidget(self.le_clip_hi)
+        self.btn_clip_full = QPushButton("全片")
+        self.btn_clip_full.setFixedWidth(64)
+        self.btn_clip_full.setToolTip("恢复为转换完整影片")
+        self.btn_clip_full.clicked.connect(self._clip_reset)
+        r.addWidget(self.btn_clip_full)
+        r.addStretch(1)
+        self.sec_clip.body_layout.addLayout(r)
+        self.clip_slider = RangeSlider()
+        self.clip_slider.setToolTip(
+            "拖动两端手柄设置片段：区间内（蓝色）将被转换，区间外不转换；\n"
+            "也可在输入框精确输入时间（HH:MM:SS）")
+        self.sec_clip.body_layout.addWidget(self.clip_slider)
+        self.lbl_clip_info = QLabel("选择左眼文件后可设置片段范围")
+        self.lbl_clip_info.setObjectName("faintlabel")
+        self.lbl_clip_info.setContentsMargins(70, 0, 0, 4)
+        self.sec_clip.body_layout.addWidget(self.lbl_clip_info)
+        root.addWidget(self.sec_clip)
+
         # ---------- 编码设置 ----------
         self.sec_enc = Section("编码设置")
         r = QHBoxLayout()
@@ -2252,8 +2467,12 @@ class MainWindow(QWidget):
         self.le_left.textChanged.connect(self._schedule_src_probe)
         self.le_right.textChanged.connect(self._schedule_src_probe)
         self.chk_open.stateChanged.connect(lambda _=None: self._refresh_summaries())
+        self.clip_slider.range_changed.connect(self._on_clip_slider)
+        self.le_clip_lo.editingFinished.connect(self._on_clip_edit)
+        self.le_clip_hi.editingFinished.connect(self._on_clip_edit)
 
         self._on_rc_change(self.cmb_rc.currentText())
+        self._init_clip_range()
         self._refresh_summaries()
         self._log("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
         self._src_timer.start()
@@ -2318,6 +2537,90 @@ class MainWindow(QWidget):
         self.le_bitrate.setEnabled(not is_cqp)
         self._refresh_summaries()
 
+    # ---------- 片段范围 ----------
+    def _clip_total(self):
+        return self._src_dur if self._src_dur > 1 else 0.0
+
+    def _set_clip_enabled(self, on):
+        self.clip_slider.setEnabled(on)
+        self.le_clip_lo.setEnabled(on)
+        self.le_clip_hi.setEnabled(on)
+        self.btn_clip_full.setEnabled(on)
+
+    def _init_clip_range(self):
+        total = self._clip_total()
+        if total <= 0:
+            self._set_clip_enabled(False)
+            self.clip_slider.set_values(0, 1000)
+            self.le_clip_lo.setText("00:00:00")
+            self.le_clip_hi.setText("00:00:00")
+            self.lbl_clip_info.setText("选择左眼文件后可设置片段范围")
+            return
+        self._set_clip_enabled(True)
+        self.clip_slider.set_values(0, 1000)
+        self.le_clip_lo.setText("00:00:00")
+        self.le_clip_hi.setText(fmt_hms(total))
+        self._clip_update_info()
+        self._refresh_summaries()
+
+    def _clip_secs(self):
+        total = self._clip_total()
+        lo, hi = self.clip_slider.values()
+        return total * lo / 1000.0, total * hi / 1000.0
+
+    def _clip_update_info(self):
+        total = self._clip_total()
+        if total <= 0:
+            return
+        lo, hi = self._clip_secs()
+        dur = max(hi - lo, 0.0)
+        fr = int(dur * 24000 / 1001)
+        full = (hi - lo) >= total - 0.5
+        self.lbl_clip_info.setText(
+            "区间时长：%s（约 %d 帧）%s · 拖动滑块或输入时间精确设置"
+            % (fmt_time(dur), fr, "（全片）" if full else ""))
+
+    def _on_clip_slider(self, lo, hi):
+        total = self._clip_total()
+        if total <= 0:
+            return
+        self.le_clip_lo.setText(fmt_hms(total * lo / 1000.0))
+        self.le_clip_hi.setText(fmt_hms(total * hi / 1000.0))
+        self._clip_update_info()
+        self._refresh_summaries()
+
+    def _on_clip_edit(self):
+        total = self._clip_total()
+        if total <= 0:
+            return
+        lo = parse_hms(self.le_clip_lo.text())
+        hi = parse_hms(self.le_clip_hi.text())
+        if lo is None or hi is None:
+            self._log("时间格式无效（示例 00:10:00 或 10:00），已还原")
+            self._on_clip_slider(*self.clip_slider.values())
+            return
+        lo = max(0.0, min(lo, max(total - 1.0, 0.0)))
+        hi = max(lo + 1.0, min(hi, total))
+        self.le_clip_lo.setText(fmt_hms(lo))
+        self.le_clip_hi.setText(fmt_hms(hi))
+        self.clip_slider.set_values(lo / total * 1000.0,
+                                    hi / total * 1000.0)
+        self._clip_update_info()
+        self._refresh_summaries()
+
+    def _clip_reset(self):
+        self._init_clip_range()
+
+    def _clip_snapshot(self):
+        """返回转换用片段 (start, end) 秒；全片时返回 None"""
+        total = self._clip_total()
+        if total <= 0:
+            return None
+        lo, hi = self._clip_secs()
+        if lo < 0.5 and hi >= total - 0.5:
+            return None
+        return (lo, min(hi, total))
+
     def _toggle_theme(self):
         self._theme = "light" if self._theme == "dark" else "dark"
         self._apply_theme()
@@ -2344,6 +2647,8 @@ class MainWindow(QWidget):
         if getattr(self, "pb", None) is not None:
             self.pb.set_theme(self._theme)
             self._apply_scrollbars()
+        if getattr(self, "clip_slider", None) is not None:
+            self.clip_slider.set_theme(self._theme)
         if getattr(self, "_dur_pair", (None, None)) != (None, None):
             self._apply_dur_check(*self._dur_pair)
 
@@ -2433,6 +2738,12 @@ class MainWindow(QWidget):
             self.cmb_ffver.currentText().split("（")[0],
             " · 复用编码" if getattr(self, "chk_reuse", None) is not None
             and self.chk_reuse.isChecked() else ""))
+        clip = self._clip_snapshot() if hasattr(self, "clip_slider") else None
+        if clip is None:
+            self.sec_clip.set_summary("全片")
+        else:
+            self.sec_clip.set_summary("%s ~ %s" % (fmt_hms(clip[0]),
+                                                   fmt_hms(clip[1])))
         n = sum(1 for p in self._seg_paths() if p)
         if n >= 2 and self.le_cat_out.text().strip():
             self.sec_cat.set_summary("%d 段已就绪 · 可开始拼接" % n)
@@ -2534,6 +2845,7 @@ class MainWindow(QWidget):
         else:
             self._src_dur = self._src_fps = self._src_a_kbps = 0.0
         self._update_size_estimate()
+        self._init_clip_range()
 
     def _update_size_estimate(self):
         if self._src_dur <= 0:
@@ -3218,6 +3530,7 @@ class MainWindow(QWidget):
             if 0 <= spos < len(self.subtitle_tracks):
                 t = self.subtitle_tracks[spos]
                 subtitle = (t[0], t[1], t[2])  # (来源, 值, 语言)
+        clip = self._clip_snapshot()
         # FFmpeg 版本解析（自动：按 NVIDIA 驱动版本匹配）
         ffver_mode = self._sel(FFMPEG_VERSIONS, self.cmb_ffver.currentText(), "auto")
         drv, drv_raw = self._nv_driver
@@ -3293,6 +3606,12 @@ class MainWindow(QWidget):
             self._log("整合字幕：%s（PGS）" % self.cmb_sub.currentText())
         else:
             self._log("整合字幕：无")
+        if clip:
+            self._log("片段范围：%s ~ %s（只转换该区间，约 %s）" % (
+                fmt_hms(clip[0]), fmt_hms(clip[1]),
+                fmt_time(clip[1] - clip[0])))
+        else:
+            self._log("片段范围：全片")
         if max_frames:
             self._log("限制帧数：%d（调试模式）" % max_frames)
         self._log("完成后打开目录：%s" % ("是" if self.chk_open.isChecked() else "否"))
@@ -3308,7 +3627,7 @@ class MainWindow(QWidget):
             qp=qp, bitrate=bitrate,
             speed=self._sel(SPEEDS, self.cmb_speed.currentText(), "quality"),
             gop=gop, audio_mode=audio_mode, audio_track=audio_track,
-            subtitle=subtitle,
+            subtitle=subtitle, clip=clip,
             open_after=self.chk_open.isChecked(), max_frames=max_frames,
             on_log=lambda s: self.bridge.log.emit(s),
             on_progress=lambda st, pct, info, rem=-1.0:
@@ -3408,7 +3727,9 @@ class MainWindow(QWidget):
               self.cmb_rc, self.cmb_qp, self.le_bitrate, self.cmb_track,
               self.cmb_audio, self.cmb_sub, self._sub_browse, self.le_gop,
               self.cmb_ffver, self.chk_open, self.chk_reuse, self.le_frames,
-              self.le_cat_out, self.btn_seg_add, self.btn_concat_run]
+              self.le_cat_out, self.btn_seg_add, self.btn_concat_run,
+              self.clip_slider, self.le_clip_lo, self.le_clip_hi,
+              self.btn_clip_full]
         for le in (self.le_left, self.le_right, self.le_out, self.le_cat_out):
             b = getattr(le, "_browse_btn", None)
             if b is not None:
@@ -3584,6 +3905,11 @@ def main():
         if sub_file_arg:
             subtitle_arg = ("f", sub_file_arg,
                             guess_sub_lang(os.path.basename(sub_file_arg)))
+        clip_arg = None
+        _cs = parse_hms(get("--start", "") or "")
+        _ce = parse_hms(get("--end", "") or "")
+        if _cs is not None and _ce is not None and _ce > _cs:
+            clip_arg = (_cs, _ce)
         qidx = int(get("--quality", "0") or 0)
         qp = QP_LEVELS[max(0, min(qidx, len(QP_LEVELS) - 1))][1]
         if not left or not right or not out:
@@ -3592,7 +3918,8 @@ def main():
                   "[--container mkv|mp4] [--encoder amf|nvenc|qsv|cpu] [--quality 0-3] "
                   "[--ffver master|8.0] "
                   "[--bitrate 20] [--frames N] [--noaudio] [--skipdemux] [--reuse] "
-                  "[--sub N（整合第 N 条内嵌字幕）| --subfile 字幕文件路径]")
+                  "[--sub N（整合第 N 条内嵌字幕）| --subfile 字幕文件路径] "
+                  "[--start HH:MM:SS --end HH:MM:SS（只转换该片段）]")
             return 1
         job = ConvertJob(
             left, right, out,
@@ -3604,6 +3931,7 @@ def main():
             qp=qp,
             audio_mode=("none" if noaudio else "dual"),
             subtitle=subtitle_arg,
+            clip=clip_arg,
             max_frames=frames, skip_demux=skipdemux, reuse_video=reuse_video,
             on_log=lambda s: print(s, flush=True),
             on_progress=lambda st, pct, info, rem=-1.0: print(

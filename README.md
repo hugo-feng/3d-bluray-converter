@@ -9,7 +9,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.7.0/3DBlurayConverter_v2.7.0_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.8.0/3DBlurayConverter_v2.8.0_portable.zip
 
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 
@@ -49,6 +49,10 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.7.0/3DBlur
 - **自动匹配右眼**：选择左眼后自动扫描同目录文件核对时长（过滤菜单 / 花絮小文件，
   按大小接近排序逐个校验），不要求文件编号相邻——例如 00098 → 00109 也能正确配对，
   全过程写入日志可核对依据
+- **片段转码（只转其中一段）**：拖动双端点滑块选择范围，只转换两端点之间的视频；
+  区间内进度条为蓝色、区间外为主题底色；两个端点均显示时间戳，
+  支持**鼠标拖动**与**输入框精确输入**（HH:MM:SS / MM:SS）；
+  音频与字幕会随片段自动同步裁剪（选左眼后自动确定全片时长范围）
 - **整合字幕**：选择左眼后**自动探测源盘全部内嵌字幕**（PGS 图形字幕，含语言标识）
   与**外挂字幕文件**（同目录 / BDMV 常见位置的 .sup / .pgs / .srt / .ass），
   可在下拉中选择一条整合进成品；也可点「浏览」**手动选择字幕文件**（保底方式）；
