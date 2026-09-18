@@ -9,7 +9,7 @@
 
 **免安装便携版**（内置全部工具链，解压即用，约 260 MB）：
 
-https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.1/3DBlurayConverter_v2.9.1_portable.zip
+https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.2/3DBlurayConverter_v2.9.2_portable.zip
 
 > 解压到**纯英文路径**，双击 `3DBlurayConverter.exe` 运行。需要 Windows 10/11 x64。
 
@@ -52,7 +52,7 @@ https://github.com/hugo-feng/3d-bluray-converter/releases/download/v2.9.1/3DBlur
 - **片段转码（只转其中一段）**：独立滑动开关（默认关闭，关闭时转换全片）；
   启用后拖动双端点滑块选择范围——区间内蓝色、区间外主题底色；
   端点时间分为「时 / 分 / 秒」三个输入框，支持鼠标拖动与精确输入；
-  **解流阶段即只解出所选片段**（中间文件仅片段大小，耗时按片段大幅减小）；
+  **解流阶段即只解出所选片段**（  中间文件仅片段大小，耗时按片段大幅减小；**中间目录按「年月日时分秒 + 成品名」命名**）；
   音频与字幕自动同步裁剪；预估大小、用时与开始前确认弹窗均按片段时长计算
 - **整合字幕**：选择左眼后**自动探测源盘全部内嵌字幕**（PGS 图形字幕，含语言标识）
   与**外挂字幕文件**（同目录 / BDMV 常见位置的 .sup / .pgs / .srt / .ass），

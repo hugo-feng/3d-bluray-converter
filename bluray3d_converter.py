@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.1"
+APP_VERSION = "v2.9.2"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -952,15 +952,64 @@ class ConvertJob(threading.Thread):
     def _log(self, s):
         self.on_log(s)
 
+    def _prepare_workdir(self):
+        """中间目录命名：_bd3d_work_<年月日时分秒>_<成品名>
+
+        复用模式（勾选「复用已完成的编码」）下优先沿用上一次的中间目录，
+        以便跳过已完成的编码阶段。
+        """
+        out_dir = os.path.dirname(os.path.abspath(self.out_file))
+        out_name = os.path.splitext(os.path.basename(self.out_file))[0] or "output"
+        if self.reuse_video:
+            old = self._find_reuse_workdir(out_dir, out_name)
+            if old:
+                self._log("复用模式：沿用上次的中间目录 " + old)
+                return old
+            self._log("复用模式：未找到可沿用的中间目录"
+                      "（首次运行 / 输出路径或片段范围已变化），将完整执行")
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        ascii_name = re.sub(r"[^A-Za-z0-9_.-]", "_", out_name) or "output"
+        preferred = os.path.join(out_dir,
+                                 "_bd3d_work_%s_%s" % (ts, out_name))
+        path = ascii_workdir(preferred, ascii_name)
+        if os.path.normcase(path) != os.path.normcase(preferred):
+            self._log("输出路径含非 ASCII 字符，中间文件改用：" + path)
+        return path
+
+    def _find_reuse_workdir(self, out_dir, out_name):
+        """查找可复用的中间目录（最新的、名称匹配且含已完成视频）"""
+        left_name = os.path.splitext(os.path.basename(self.left_file))[0]
+        ascii_name = re.sub(r"[^A-Za-z0-9_.-]", "_", out_name)
+        keys = [k for k in (out_name, ascii_name, left_name) if k]
+        best, best_t = None, -1.0
+        try:
+            names = os.listdir(out_dir)
+        except OSError:
+            return None
+        for d in names:
+            if not d.startswith("_bd3d_work_"):
+                continue
+            if not any(d.endswith(k) for k in keys):
+                continue
+            p = os.path.join(out_dir, d)
+            if not os.path.isdir(p):
+                continue
+            vid = os.path.join(p, "video_only.mkv")
+            if not os.path.exists(vid):
+                continue
+            try:
+                t = os.path.getmtime(vid)
+            except OSError:
+                continue
+            if t > best_t:
+                best, best_t = p, t
+        return best
+
     def run(self):
         try:
             t_all = time.time()
             name = os.path.splitext(os.path.basename(self.left_file))[0]
-            out_dir = os.path.dirname(os.path.abspath(self.out_file))
-            preferred = os.path.join(out_dir, "_bd3d_work_" + name)
-            self.workdir = ascii_workdir(preferred, name)
-            if os.path.normcase(self.workdir) != os.path.normcase(preferred):
-                self._log("输出路径含非 ASCII 字符，中间文件改用：" + self.workdir)
+            self.workdir = self._prepare_workdir()
             os.makedirs(self.workdir, exist_ok=True)
             try:
                 self.stats["src_size"] = (os.path.getsize(self.left_file)
@@ -1369,12 +1418,13 @@ class ConvertJob(threading.Thread):
                 else:
                     self._log("字幕文件不存在，本次未整合字幕：%s" % sval)
             else:
-                self._log("提取内嵌字幕（PGS #%d，%s）..." % (sval + 1, slang))
+                self._log("提取内嵌字幕（PGS #%d，%s，完整提取后按片段对齐）..."
+                          % (sval + 1, slang))
                 sub_path = os.path.join(self.workdir, "subtitle.sup")
-                _c0 = self.clip[0] if self.clip else 0.0
-                _sub_dur = (self.clip[1] - self.clip[0]) if self.clip else dur
+                # 注意：不能用 -ss/-t 对字幕流做输入裁剪——PGS 的字幕段（epoch）
+                # 可能跨越裁剪点，输入 seek 会丢失该段字幕（表现为字幕缺失/错位）。
+                # 因此完整提取，混流时用 -itsoffset 平移对齐片段起点。
                 cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats",
-                       "-ss", "%.3f" % _c0, "-t", "%.3f" % max(_sub_dur, 1.0),
                        "-i", audio_src, "-map", "0:s:%d" % sval,
                        "-c", "copy", sub_path]
                 p = popen_hidden(cmd)
@@ -1452,8 +1502,13 @@ class ConvertJob(threading.Thread):
             cmd += ["-i", a]
         # 字幕必须作为输入放在全部 -map 之前
         # （-map 若出现在 -i 之前会被 ffmpeg 当作该输入的选项而报错）
+        # 片段模式下用 -itsoffset 把完整字幕平移对齐片段起点
         if sub_file is not None:
-            cmd += ["-i", sub_file]
+            _c0 = self.clip[0] if self.clip else 0.0
+            if _c0 > 0:
+                cmd += ["-itsoffset", "%.3f" % (-_c0), "-i", sub_file]
+            else:
+                cmd += ["-i", sub_file]
         cmd += ["-map", "0:v"]
         for i in range(len(audio_files)):
             cmd += ["-map", "%d:a" % (i + 1)]
@@ -2260,14 +2315,14 @@ class MainWindow(QWidget):
         self.cmb_layout = NoWheelComboBox()
         self.cmb_layout.addItems([x[0] for x in LAYOUTS])
         self._set_combo(self.cmb_layout, self.cfg.get("layout", LAYOUTS[0][0]))
-        self.cmb_layout.setFixedWidth(300)
-        r.addWidget(self.cmb_layout)
+        self.cmb_layout.setMinimumWidth(280)
+        r.addWidget(self.cmb_layout, 2)
         r.addWidget(mk_label("容器"))
         self.cmb_container = NoWheelComboBox()
         self.cmb_container.addItems([x[0] for x in CONTAINERS])
         self._set_combo(self.cmb_container, self.cfg.get("container", CONTAINERS[0][0]))
-        self.cmb_container.setFixedWidth(190)
-        r.addWidget(self.cmb_container)
+        self.cmb_container.setMinimumWidth(260)
+        r.addWidget(self.cmb_container, 1)
         r.addStretch(1)
         self.sec_fmt.body_layout.addLayout(r)
         root.addWidget(self.sec_fmt)
@@ -2346,8 +2401,8 @@ class MainWindow(QWidget):
         self.cmb_encoder.setToolTip(ENCODER_TIP_BASE)
         self.cmb_encoder.activated.connect(
             lambda _=None: setattr(self, "_encoder_touched", True))
-        self.cmb_encoder.setFixedWidth(300)
-        r.addWidget(self.cmb_encoder)
+        self.cmb_encoder.setMinimumWidth(280)
+        r.addWidget(self.cmb_encoder, 2)
         r.addWidget(mk_label("速度"))
         self.cmb_speed = NoWheelComboBox()
         self.cmb_speed.addItems([x[0] for x in SPEEDS])
@@ -2357,8 +2412,8 @@ class MainWindow(QWidget):
             "  · 质量优先：编码最慢，同画质下体积最小（画质最佳）\n"
             "  · 平衡：速度与体积折中\n"
             "  · 速度优先：编码最快，体积略大")
-        self.cmb_speed.setFixedWidth(190)
-        r.addWidget(self.cmb_speed)
+        self.cmb_speed.setMinimumWidth(260)
+        r.addWidget(self.cmb_speed, 1)
         r.addStretch(1)
         self.sec_enc.body_layout.addLayout(r)
         r = QHBoxLayout()
@@ -2373,8 +2428,8 @@ class MainWindow(QWidget):
             "  · 目标平均码率（VBR）：按目标码率编码，体积可控、画质浮动\n"
             "  · 固定码率（CBR）：码率恒定，体积固定、兼容性最好\n"
             "  切换后，下方「质量」或「码率」输入框会自动启用其一")
-        self.cmb_rc.setFixedWidth(300)
-        r.addWidget(self.cmb_rc)
+        self.cmb_rc.setMinimumWidth(280)
+        r.addWidget(self.cmb_rc, 2)
         r.addWidget(mk_label("质量"))
         self.cmb_qp = NoWheelComboBox()
         self.cmb_qp.addItems([x[0] for x in QP_LEVELS])
@@ -2385,8 +2440,8 @@ class MainWindow(QWidget):
             "  · 标准 CQP 20：约 21 Mbps（推荐）\n"
             "  · 压缩 CQP 22：约 15 Mbps\n"
             "  · 高压缩 CQP 24：约 10 Mbps（体积最小）")
-        self.cmb_qp.setFixedWidth(190)
-        r.addWidget(self.cmb_qp)
+        self.cmb_qp.setMinimumWidth(260)
+        r.addWidget(self.cmb_qp, 1)
         r.addStretch(1)
         self.sec_enc.body_layout.addLayout(r)
         r = QHBoxLayout()
@@ -2409,14 +2464,14 @@ class MainWindow(QWidget):
         r.addWidget(mk_label("主音轨"))
         self.cmb_track = NoWheelComboBox()
         self.cmb_track.addItem("自动（英语优先，最高声道）")
-        self.cmb_track.setFixedWidth(300)
-        r.addWidget(self.cmb_track)
+        self.cmb_track.setMinimumWidth(280)
+        r.addWidget(self.cmb_track, 2)
         r.addWidget(mk_label("音频输出"))
         self.cmb_audio = NoWheelComboBox()
         self.cmb_audio.addItems([x[0] for x in AUDIO_MODES])
         self._set_combo(self.cmb_audio, self.cfg.get("audio", AUDIO_MODES[0][0]))
-        self.cmb_audio.setFixedWidth(190)
-        r.addWidget(self.cmb_audio)
+        self.cmb_audio.setMinimumWidth(260)
+        r.addWidget(self.cmb_audio, 1)
         r.addStretch(1)
         self.sec_aud.body_layout.addLayout(r)
         r = QHBoxLayout()
@@ -2428,8 +2483,8 @@ class MainWindow(QWidget):
             "选择左眼文件后自动列出全部字幕轨（含语言标识）。\n"
             "提示：蓝光 3D 盘常有多条同语言字幕（正片版 / 不同画布版），\n"
             "整合后字幕大小与位置由播放器按视频尺寸渲染，建议多试几条选择显示效果最好的。")
-        self.cmb_sub.setFixedWidth(300)
-        r.addWidget(self.cmb_sub)
+        self.cmb_sub.setMinimumWidth(280)
+        r.addWidget(self.cmb_sub, 2)
         self._sub_browse = QPushButton("浏览")
         self._sub_browse.setFixedWidth(64)
         self._sub_browse.setToolTip(
@@ -2463,8 +2518,8 @@ class MainWindow(QWidget):
         self.cmb_ffver = NoWheelComboBox()
         self.cmb_ffver.addItems([x[0] for x in FFMPEG_VERSIONS])
         self._set_combo(self.cmb_ffver, self.cfg.get("ffver", FFMPEG_VERSIONS[0][0]))
-        self.cmb_ffver.setFixedWidth(300)
-        r.addWidget(self.cmb_ffver)
+        self.cmb_ffver.setMinimumWidth(280)
+        r.addWidget(self.cmb_ffver, 2)
         r.addStretch(1)
         self.sec_adv.body_layout.addLayout(r)
         tip2 = QLabel("N 卡 NVENC 报「驱动版本不满足」时，可切换兼容版 8.0 或改选其他编码器")
