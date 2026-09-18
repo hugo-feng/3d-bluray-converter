@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.8.0"
+APP_VERSION = "v2.9.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -972,6 +972,13 @@ class ConvertJob(threading.Thread):
                 self.stats["demux"] = time.time() - t_demux
             if nframes <= 0:
                 nframes = self._estimate_frames()
+            if self.clip:
+                est = max(int(round(
+                    (self.clip[1] - self.clip[0]) * 24000.0 / 1001.0)), 1)
+                if nframes <= 0 or nframes > est * 1.5:
+                    nframes = est
+                    self._log("片段模式：按区间估算帧数 %d（解流仅输出所选片段）"
+                              % nframes)
             if nframes > 0:
                 self._log("解流完成：%d 帧，开始视频编码" % nframes)
 
@@ -1068,10 +1075,17 @@ class ConvertJob(threading.Thread):
         right_pid = probe_stream_pid(self.right_file, "MVC")
         self._log("探测到轨道：左眼 AVC PID=%d，右眼 MVC PID=%d" % (left_pid, right_pid))
         meta_path = os.path.join(self.workdir, "demux.meta")
-        meta = ("MUXOPT --no-pcr-on-video-pid --new-audio-pes --demux --vbr --vbv-len=500\n"
+        cut_opts = ""
+        if self.clip:
+            cut_opts = ("--cut-start=%dms --cut-end=%dms "
+                        % (int(round(self.clip[0] * 1000)),
+                           int(round(self.clip[1] * 1000))))
+            self._log("解流裁剪：%s ~ %s（只解出该片段，中间文件大幅减小）"
+                      % (fmt_hms(self.clip[0]), fmt_hms(self.clip[1])))
+        meta = ("MUXOPT %s--no-pcr-on-video-pid --new-audio-pes --demux --vbr --vbv-len=500\n"
                 'V_MPEG4/ISO/AVC, "%s", track=%d\n'
                 'V_MPEG4/ISO/MVC, "%s", track=%d\n'
-                % (self.left_file, left_pid, self.right_file, right_pid))
+                % (cut_opts, self.left_file, left_pid, self.right_file, right_pid))
         with open(meta_path, "w", encoding="utf-8") as f:
             f.write(meta)
         p = popen_hidden([TSMUXER, meta_path, self.workdir])
@@ -1185,7 +1199,13 @@ class ConvertJob(threading.Thread):
         return self.left_file, (idx if idx is not None else 0)
 
     # ---------- 阶段 2：编码 ----------
-    def _build_avs(self, base, dep, nframes, total, f0=0):
+    def _build_avs(self, base, dep, nframes, total):
+        """构建 AviSynth 脚本。
+
+        注意：片段模式在解流阶段已裁剪（tsMuxeR --cut-start/--cut-end），
+        ES 从片段起点开始，此处**不能**再用 Trim 做中段裁剪——
+        MVC 解码器对中段帧号的随机访问需要从第 0 帧顺序解码数万帧，会极慢甚至卡死。
+        """
         if self.layout == "full_sbs":
             tail = "StackHorizontal(left, right)\n"
         elif self.layout == "half_sbs":
@@ -1200,9 +1220,7 @@ class ConvertJob(threading.Thread):
                'left  = SelectEven(interleaved)\n'
                'right = SelectOdd(interleaved)\n'
                '%s' % (safe_plugin_path(FRIMSOURCE), base, dep, nframes, tail))
-        if self.clip:
-            avs += "Trim(%d, %d)\n" % (f0, f0 + total - 1)
-        elif self.max_frames:
+        if self.max_frames:
             avs += "Trim(0, %d)\n" % (total - 1)
         return avs
 
@@ -1212,15 +1230,12 @@ class ConvertJob(threading.Thread):
 
     def _encode(self, base, dep, nframes, audio_src, audio_idx, audio_codec):
         total = nframes
-        f0 = 0
         if self.clip:
-            f0 = max(int(round(self.clip[0] * 24000.0 / 1001.0)), 0)
-            f1 = max(int(round(self.clip[1] * 24000.0 / 1001.0)), f0 + 1)
-            total = f1 - f0
-            self._log("片段裁剪：%s ~ %s（约 %d 帧）"
-                      % (fmt_hms(self.clip[0]), fmt_hms(self.clip[1]),
-                         min(total, nframes)))
-            total = min(total, max(nframes, 1))
+            clip_frames = max(int(round(
+                (self.clip[1] - self.clip[0]) * 24000.0 / 1001.0)), 1)
+            total = min(clip_frames, max(nframes, 1)) if nframes > 0 else clip_frames
+            self._log("片段编码：%s ~ %s（约 %d 帧，中间文件仅含该片段）"
+                      % (fmt_hms(self.clip[0]), fmt_hms(self.clip[1]), total))
         if self.max_frames:
             total = min(total, self.max_frames)
         # ---- 阶段 2A：编码纯视频（可复用上次已完成的编码结果）----
@@ -1257,13 +1272,13 @@ class ConvertJob(threading.Thread):
             t_enc = time.time()
             avs_path = os.path.join(self.workdir, "decode.avs")
             with open(avs_path, "w", encoding="utf-8") as f:
-                f.write(self._build_avs(base, dep, nframes, total, f0))
+                f.write(self._build_avs(base, dep, nframes, total))
 
             # ---- 阶段 2A：编码纯视频 ----
             tmp_video = os.path.join(self.workdir, "video_only.mkv")
             cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
                    "-i", avs_path, "-an"] + self._video_args()
-            if self.max_frames:
+            if self.max_frames or self.clip:
                 cmd += ["-frames:v", str(total)]
             cmd += ["-f", "matroska", tmp_video]
 
@@ -2174,18 +2189,47 @@ class MainWindow(QWidget):
         root.addWidget(self.sec_fmt)
 
         # ---------- 片段范围（只转换指定区间） ----------
-        self.sec_clip = Section("片段范围（可选：只转换其中一段）")
+        self.sec_clip = Section("片段范围（只转换指定区间）")
+        r = QHBoxLayout()
+        self.chk_clip = QCheckBox("启用片段范围（默认关闭，关闭时转换全片）")
+        self.chk_clip.setChecked(False)
+        self.chk_clip.setToolTip(
+            "勾选后：只转换两端点之间的视频（其余部分不转换）；\n"
+            "解流阶段即只解出该片段，中间文件与耗时都会大幅减小")
+        self.chk_clip.stateChanged.connect(self._on_clip_toggle)
+        r.addWidget(self.chk_clip)
+        r.addStretch(1)
+        self.sec_clip.body_layout.addLayout(r)
         r = QHBoxLayout()
         r.addWidget(QLabel("起点"))
-        self.le_clip_lo = QLineEdit("00:00:00")
-        self.le_clip_lo.setFixedWidth(96)
-        self.le_clip_lo.setToolTip("片段起点，支持 HH:MM:SS 或 MM:SS，回车确认")
-        r.addWidget(self.le_clip_lo)
+        self.clip_lo_boxes = []
+        for unit, mx in (("时", 3), ("分", 2), ("秒", 2)):
+            e = QLineEdit("00")
+            e.setFixedWidth(46)
+            e.setAlignment(Qt.AlignCenter)
+            e.setMaxLength(mx)
+            e.setToolTip("片段起点（时:分:秒），修改后回车确认")
+            e.editingFinished.connect(self._on_clip_edit)
+            r.addWidget(e)
+            self.clip_lo_boxes.append(e)
+            ul = QLabel(unit)
+            ul.setObjectName("faintlabel")
+            r.addWidget(ul)
+        r.addSpacing(14)
         r.addWidget(QLabel("终点"))
-        self.le_clip_hi = QLineEdit("00:00:00")
-        self.le_clip_hi.setFixedWidth(96)
-        self.le_clip_hi.setToolTip("片段终点，支持 HH:MM:SS 或 MM:SS，回车确认")
-        r.addWidget(self.le_clip_hi)
+        self.clip_hi_boxes = []
+        for unit, mx in (("时", 3), ("分", 2), ("秒", 2)):
+            e = QLineEdit("00")
+            e.setFixedWidth(46)
+            e.setAlignment(Qt.AlignCenter)
+            e.setMaxLength(mx)
+            e.setToolTip("片段终点（时:分:秒），修改后回车确认")
+            e.editingFinished.connect(self._on_clip_edit)
+            r.addWidget(e)
+            self.clip_hi_boxes.append(e)
+            ul = QLabel(unit)
+            ul.setObjectName("faintlabel")
+            r.addWidget(ul)
         self.btn_clip_full = QPushButton("全片")
         self.btn_clip_full.setFixedWidth(64)
         self.btn_clip_full.setToolTip("恢复为转换完整影片")
@@ -2196,7 +2240,7 @@ class MainWindow(QWidget):
         self.clip_slider = RangeSlider()
         self.clip_slider.setToolTip(
             "拖动两端手柄设置片段：区间内（蓝色）将被转换，区间外不转换；\n"
-            "也可在输入框精确输入时间（HH:MM:SS）")
+            "也可在输入框精确输入时间（时:分:秒）")
         self.sec_clip.body_layout.addWidget(self.clip_slider)
         self.lbl_clip_info = QLabel("选择左眼文件后可设置片段范围")
         self.lbl_clip_info.setObjectName("faintlabel")
@@ -2468,8 +2512,6 @@ class MainWindow(QWidget):
         self.le_right.textChanged.connect(self._schedule_src_probe)
         self.chk_open.stateChanged.connect(lambda _=None: self._refresh_summaries())
         self.clip_slider.range_changed.connect(self._on_clip_slider)
-        self.le_clip_lo.editingFinished.connect(self._on_clip_edit)
-        self.le_clip_hi.editingFinished.connect(self._on_clip_edit)
 
         self._on_rc_change(self.cmb_rc.currentText())
         self._init_clip_range()
@@ -2541,85 +2583,158 @@ class MainWindow(QWidget):
     def _clip_total(self):
         return self._src_dur if self._src_dur > 1 else 0.0
 
-    def _set_clip_enabled(self, on):
-        self.clip_slider.setEnabled(on)
-        self.le_clip_lo.setEnabled(on)
-        self.le_clip_hi.setEnabled(on)
-        self.btn_clip_full.setEnabled(on)
+    def _clip_enabled(self):
+        return (getattr(self, "chk_clip", None) is not None
+                and self.chk_clip.isChecked())
+
+    def _hms_box_get(self, boxes):
+        try:
+            h = int(boxes[0].text().strip() or "0")
+            m = int(boxes[1].text().strip() or "0")
+            s = int(boxes[2].text().strip() or "0")
+        except (ValueError, IndexError):
+            return None
+        return h * 3600 + m * 60 + s
+
+    def _hms_box_set(self, boxes, sec):
+        sec = int(max(sec, 0))
+        boxes[0].setText("%d" % (sec // 3600))
+        boxes[1].setText("%02d" % ((sec % 3600) // 60))
+        boxes[2].setText("%02d" % (sec % 60))
+
+    def _set_clip_range(self, lo, hi):
+        total = self._clip_total()
+        self._hms_box_set(self.clip_lo_boxes, lo)
+        self._hms_box_set(self.clip_hi_boxes, hi)
+        if total > 0:
+            self.clip_slider.set_values(lo / total * 1000.0,
+                                        hi / total * 1000.0)
+        self._clip_update_info()
+
+    def _refresh_clip_state(self):
+        """按开关状态与源时长刷新片段控件的可用性"""
+        total = self._clip_total()
+        use = self._clip_enabled() and total > 0
+        self.clip_slider.setEnabled(use)
+        for b in list(getattr(self, "clip_lo_boxes", [])) \
+                + list(getattr(self, "clip_hi_boxes", [])):
+            b.setEnabled(use)
+        self.btn_clip_full.setEnabled(use)
+        if not self._clip_enabled():
+            self.lbl_clip_info.setText(
+                "未启用：转换全片（勾选上方开关后启用片段范围）")
+        elif total <= 0:
+            self.lbl_clip_info.setText("选择左眼文件后可设置片段范围")
+        else:
+            self._clip_update_info()
 
     def _init_clip_range(self):
+        """源文件变化后重置片段范围（保留开关状态）"""
         total = self._clip_total()
+        if getattr(self, "chk_clip", None) is not None:
+            self.chk_clip.setEnabled(total > 0)
         if total <= 0:
-            self._set_clip_enabled(False)
-            self.clip_slider.set_values(0, 1000)
-            self.le_clip_lo.setText("00:00:00")
-            self.le_clip_hi.setText("00:00:00")
-            self.lbl_clip_info.setText("选择左眼文件后可设置片段范围")
+            if getattr(self, "chk_clip", None) is not None:
+                self.chk_clip.setChecked(False)
+            self._refresh_clip_state()
             return
-        self._set_clip_enabled(True)
-        self.clip_slider.set_values(0, 1000)
-        self.le_clip_lo.setText("00:00:00")
-        self.le_clip_hi.setText(fmt_hms(total))
-        self._clip_update_info()
+        if self._clip_enabled():
+            lo = self._hms_box_get(self.clip_lo_boxes)
+            hi = self._hms_box_get(self.clip_hi_boxes)
+            if lo is None or lo >= total:
+                lo = 0
+            if hi is None or hi <= lo or hi > total:
+                hi = int(total)
+            self._set_clip_range(lo, hi)
+        else:
+            self._set_clip_range(0, int(total))
+        self._refresh_clip_state()
         self._refresh_summaries()
 
-    def _clip_secs(self):
-        total = self._clip_total()
-        lo, hi = self.clip_slider.values()
-        return total * lo / 1000.0, total * hi / 1000.0
+    def _on_clip_toggle(self, _state=None):
+        self._refresh_clip_state()
+        self._refresh_summaries()
 
     def _clip_update_info(self):
         total = self._clip_total()
         if total <= 0:
             return
-        lo, hi = self._clip_secs()
-        dur = max(hi - lo, 0.0)
+        lo = self._hms_box_get(self.clip_lo_boxes)
+        hi = self._hms_box_get(self.clip_hi_boxes)
+        if lo is None or hi is None:
+            return
+        dur = max(hi - lo, 0)
         fr = int(dur * 24000 / 1001)
-        full = (hi - lo) >= total - 0.5
+        full = (lo < 0.5 and hi >= total - 0.5)
         self.lbl_clip_info.setText(
             "区间时长：%s（约 %d 帧）%s · 拖动滑块或输入时间精确设置"
-            % (fmt_time(dur), fr, "（全片）" if full else ""))
+            % (fmt_time(dur), fr, "（当前为全片）" if full else ""))
 
     def _on_clip_slider(self, lo, hi):
         total = self._clip_total()
         if total <= 0:
             return
-        self.le_clip_lo.setText(fmt_hms(total * lo / 1000.0))
-        self.le_clip_hi.setText(fmt_hms(total * hi / 1000.0))
+        self._hms_box_set(self.clip_lo_boxes, total * lo / 1000.0)
+        self._hms_box_set(self.clip_hi_boxes, total * hi / 1000.0)
         self._clip_update_info()
         self._refresh_summaries()
 
     def _on_clip_edit(self):
         total = self._clip_total()
-        if total <= 0:
+        if total <= 0 or not self._clip_enabled():
             return
-        lo = parse_hms(self.le_clip_lo.text())
-        hi = parse_hms(self.le_clip_hi.text())
+        lo = self._hms_box_get(self.clip_lo_boxes)
+        hi = self._hms_box_get(self.clip_hi_boxes)
         if lo is None or hi is None:
-            self._log("时间格式无效（示例 00:10:00 或 10:00），已还原")
-            self._on_clip_slider(*self.clip_slider.values())
+            self._log("时间输入无效，已还原")
+            self._set_clip_range(int(self._clip_secs()[0]),
+                                 int(self._clip_secs()[1]))
             return
-        lo = max(0.0, min(lo, max(total - 1.0, 0.0)))
-        hi = max(lo + 1.0, min(hi, total))
-        self.le_clip_lo.setText(fmt_hms(lo))
-        self.le_clip_hi.setText(fmt_hms(hi))
-        self.clip_slider.set_values(lo / total * 1000.0,
-                                    hi / total * 1000.0)
-        self._clip_update_info()
+        lo0, hi0 = lo, hi
+        lo = max(0, min(lo, int(total) - 1))
+        hi = max(lo + 1, min(hi, int(total)))
+        if (lo, hi) != (lo0, hi0):
+            self._log("时间超出影片长度（%s）或区间无效，已调整为 %s ~ %s"
+                      % (fmt_hms(total), fmt_hms(lo), fmt_hms(hi)))
+        self._set_clip_range(lo, hi)
         self._refresh_summaries()
 
     def _clip_reset(self):
-        self._init_clip_range()
+        total = self._clip_total()
+        if total > 0:
+            self._set_clip_range(0, int(total))
+        self._refresh_summaries()
+
+    def _clip_secs(self):
+        """当前（滑块）区间秒数"""
+        total = self._clip_total()
+        lo, hi = self.clip_slider.values()
+        return total * lo / 1000.0, total * hi / 1000.0
 
     def _clip_snapshot(self):
-        """返回转换用片段 (start, end) 秒；全片时返回 None"""
+        """返回转换用片段 (start, end) 秒；未启用或全片时返回 None"""
+        if not self._clip_enabled():
+            return None
         total = self._clip_total()
         if total <= 0:
             return None
-        lo, hi = self._clip_secs()
+        lo = self._hms_box_get(self.clip_lo_boxes)
+        hi = self._hms_box_get(self.clip_hi_boxes)
+        if lo is None or hi is None:
+            return None
+        lo = max(0.0, min(float(lo), total))
+        hi = max(lo + 1.0, min(float(hi), total))
         if lo < 0.5 and hi >= total - 0.5:
             return None
-        return (lo, min(hi, total))
+        return (lo, hi)
+
+    def _clip_duration(self):
+        """有效转换时长（片段启用时为片段时长，否则全片）"""
+        total = self._clip_total()
+        snap = self._clip_snapshot()
+        if snap:
+            return min(snap[1] - snap[0], total or (snap[1] - snap[0]))
+        return total
 
     def _toggle_theme(self):
         self._theme = "light" if self._theme == "dark" else "dark"
@@ -2739,8 +2854,10 @@ class MainWindow(QWidget):
             " · 复用编码" if getattr(self, "chk_reuse", None) is not None
             and self.chk_reuse.isChecked() else ""))
         clip = self._clip_snapshot() if hasattr(self, "clip_slider") else None
-        if clip is None:
-            self.sec_clip.set_summary("全片")
+        if not hasattr(self, "chk_clip") or not self._clip_enabled():
+            self.sec_clip.set_summary("未启用（全片）")
+        elif clip is None:
+            self.sec_clip.set_summary("已启用（全片）")
         else:
             self.sec_clip.set_summary("%s ~ %s" % (fmt_hms(clip[0]),
                                                    fmt_hms(clip[1])))
@@ -2852,6 +2969,9 @@ class MainWindow(QWidget):
             self.lbl_out_size.setText(
                 "预计输出大小：选择左右眼文件后自动估算（随布局 / 编码器 / 质量档变化）")
             return
+        dur = self._clip_duration()
+        if dur <= 0:
+            dur = self._src_dur
         layout = self._sel(LAYOUTS, self.cmb_layout.currentText(), "full_sbs")
         encoder = self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf")
         rc = self._sel(RC_MODES, self.cmb_rc.currentText(), "cqp")
@@ -2862,15 +2982,18 @@ class MainWindow(QWidget):
             bitrate = 20
         audio_mode = self._sel(AUDIO_MODES, self.cmb_audio.currentText(), "dual")
         mb, v_kbps, a_kbps = estimate_output_size(
-            self._src_dur, self._src_fps or 23.976, layout, encoder, rc, qp,
+            dur, self._src_fps or 23.976, layout, encoder, rc, qp,
             bitrate, self._src_a_kbps, audio_mode)
         if mb >= 1024:
             size_txt = "约 %.1f GB" % (mb / 1024.0)
         else:
             size_txt = "约 %.0f MB" % mb
+        clip_on = self._clip_snapshot() is not None
         self.lbl_out_size.setText(
-            "预计输出大小：%s（视频约 %.1f Mbps + 音频约 %.1f Mbps；"
-            "实际随画面复杂度浮动）" % (size_txt, v_kbps / 1000.0, a_kbps / 1000.0))
+            "预计输出大小：%s（%s视频约 %.1f Mbps + 音频约 %.1f Mbps；"
+            "实际随画面复杂度浮动）" % (
+                size_txt, "片段 " + fmt_time(dur) + "，" if clip_on else "",
+                v_kbps / 1000.0, a_kbps / 1000.0))
 
     def _update_cat_estimate(self):
         total = 0
@@ -3129,7 +3252,13 @@ class MainWindow(QWidget):
         self._log("检测到 %d 条音轨" % len(tracks))
 
     def _apply_subs(self, payload):
-        """填充字幕下拉：内嵌 PGS（自动探测）+ 外挂字幕文件（自动探索）"""
+        """填充字幕下拉：内嵌 PGS（自动探测）+ 外挂字幕文件（自动探索）。
+
+        自动选择规则（用户可随时手动更改）：
+          1. 文件名含「中英 / 双语」的外挂字幕（中英双语优先）
+          2. 内嵌中文字幕（第一条）
+          3. 其它含中文的外挂字幕
+        """
         embedded, external = payload or ((), ())
         self.subtitle_tracks = []
         self.cmb_sub.clear()
@@ -3148,6 +3277,25 @@ class MainWindow(QWidget):
         else:
             self._log("未检测到内嵌字幕，也未找到外挂字幕文件"
                       "（可点「浏览」手动选择字幕文件）")
+        pick = None
+        for i, (_k, _v, _lg, lab) in enumerate(self.subtitle_tracks):
+            if "中英" in lab or "双语" in lab:
+                pick = i
+                break
+        if pick is None:
+            for i, (k, _v, lg, _lab) in enumerate(self.subtitle_tracks):
+                if k == "e" and lg == "zho":
+                    pick = i
+                    break
+        if pick is None:
+            for i, (_k, _v, lg, _lab) in enumerate(self.subtitle_tracks):
+                if lg == "zho":
+                    pick = i
+                    break
+        if pick is not None:
+            self.cmb_sub.setCurrentIndex(pick + 1)
+            self._log("已默认选择字幕：%s（可手动更改）"
+                      % self.cmb_sub.currentText())
         self._refresh_summaries()
 
     def _pick_sub_file(self):
@@ -3366,7 +3514,8 @@ class MainWindow(QWidget):
         return total
 
     def _estimated_output_mb(self):
-        if self._src_dur <= 0:
+        dur = self._clip_duration()
+        if dur <= 0:
             return 0.0
         layout = self._sel(LAYOUTS, self.cmb_layout.currentText(), "full_sbs")
         encoder = self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf")
@@ -3378,7 +3527,7 @@ class MainWindow(QWidget):
             bitrate = 20
         audio_mode = self._sel(AUDIO_MODES, self.cmb_audio.currentText(), "dual")
         mb, _, _ = estimate_output_size(
-            self._src_dur, self._src_fps or 23.976, layout, encoder, rc, qp,
+            dur, self._src_fps or 23.976, layout, encoder, rc, qp,
             bitrate, self._src_a_kbps, audio_mode)
         return mb
 
@@ -3390,7 +3539,10 @@ class MainWindow(QWidget):
             return True
         free_gb = free / 1024.0 ** 3
         est_out = self._estimated_output_mb() * 1024 * 1024
-        src_total = self._source_total_bytes()
+        total_dur = self._src_dur if self._src_dur > 0 else 0.0
+        dur = self._clip_duration() or total_dur
+        ratio = (dur / total_dur) if total_dur > 0 else 1.0
+        src_total = self._source_total_bytes() * ratio
         if est_out > 0 and free < est_out * 1.1:
             msg_err(
                 self,
@@ -3419,7 +3571,9 @@ class MainWindow(QWidget):
         不在此处同步探测时长（避免 UI 阻塞）；源时长尚未探测完成时，
         编码/音频/混流阶段暂不计入，实际执行不受影响。
         """
-        dur = self._src_dur if self._src_dur > 0 else 0.0
+        total_dur = self._src_dur if self._src_dur > 0 else 0.0
+        dur = self._clip_duration() or total_dur
+        ratio = (dur / total_dur) if total_dur > 0 else 1.0
         fps = self._src_fps if self._src_fps > 1.0 else 23.976
         src_bytes = self._source_total_bytes()
         enc = self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf")
@@ -3431,7 +3585,8 @@ class MainWindow(QWidget):
                  and self.chk_reuse.isChecked())
         stages = []
         if src_bytes > 0:
-            stages.append(("解流（分离左右眼视频流）", src_bytes / (250.0 * 1024 ** 2)))
+            stages.append(("解流（分离左右眼视频流，片段模式只解出所选区间）",
+                           src_bytes * ratio / (250.0 * 1024 ** 2)))
         if dur > 0:
             nm = "编码（合并 SBS 并重新编码）"
             if reuse:
@@ -3460,6 +3615,12 @@ class MainWindow(QWidget):
                 plan["mux"] = sec
         self._stage_plan = plan
         lines = ["即将开始 3D 转换，共 %d 个阶段：" % len(stages), ""]
+        clip = self._clip_snapshot()
+        if clip:
+            lines.insert(0, "片段范围：%s ~ %s（约 %s）——只转换该区间"
+                         % (fmt_hms(clip[0]), fmt_hms(clip[1]),
+                            fmt_time(clip[1] - clip[0])))
+            lines.insert(1, "")
         total = 0.0
         for i, (nm, sec) in enumerate(stages, 1):
             total += sec
@@ -3728,8 +3889,9 @@ class MainWindow(QWidget):
               self.cmb_audio, self.cmb_sub, self._sub_browse, self.le_gop,
               self.cmb_ffver, self.chk_open, self.chk_reuse, self.le_frames,
               self.le_cat_out, self.btn_seg_add, self.btn_concat_run,
-              self.clip_slider, self.le_clip_lo, self.le_clip_hi,
-              self.btn_clip_full]
+              self.chk_clip, self.clip_slider, self.btn_clip_full]
+        ws += list(getattr(self, "clip_lo_boxes", []))
+        ws += list(getattr(self, "clip_hi_boxes", []))
         for le in (self.le_left, self.le_right, self.le_out, self.le_cat_out):
             b = getattr(le, "_browse_btn", None)
             if b is not None:
