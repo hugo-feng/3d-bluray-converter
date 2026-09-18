@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.3"
+APP_VERSION = "v2.9.4"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -563,11 +563,11 @@ def make_msgbox(parent, icon, text, buttons, default_button=None):
     return mb
 
 
-def mk_label(text, width=84):
-    """统一样式：固定宽度标签（文字居中，保证各行标签列对齐且不与控件脱开）"""
+def mk_label(text, width=60):
+    """统一样式：固定宽度标签（右对齐——右边界对齐且紧贴控件，兼顾整齐与紧凑）"""
     lb = QLabel(text)
     lb.setFixedWidth(width)
-    lb.setAlignment(Qt.AlignCenter)
+    lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
     return lb
 
 
@@ -983,7 +983,7 @@ class ConvertJob(threading.Thread):
         """查找可复用的中间目录（最新的、名称匹配且含已完成视频）"""
         left_name = os.path.splitext(os.path.basename(self.left_file))[0]
         ascii_name = re.sub(r"[^A-Za-z0-9_.-]", "_", out_name)
-        keys = [k for k in (out_name, ascii_name, left_name) if k]
+        keys = [k for k in (out_name, ascii_name, left_name, "output") if k]
         best, best_t = None, -1.0
         try:
             names = os.listdir(out_dir)
@@ -1518,6 +1518,11 @@ class ConvertJob(threading.Thread):
         if sub_file is not None:
             cmd += ["-map", "%d:s" % (1 + len(audio_files))]
         cmd += ["-c", "copy"]
+        if self.clip:
+            # 字幕为「完整提取 + 平移」，600s 之后的字幕包会超出成品时长，
+            # 使混流器反复修正时间戳（表现为卡在最后阶段）。
+            # 用输出时长限制丢弃超范围包（视频/音频本身已不超过该时长）。
+            cmd += ["-t", "%.3f" % ((self.clip[1] - self.clip[0]) + 1.0)]
         if len(audio_files) >= 1:
             cmd += ["-metadata:s:a:0", "language=eng",
                     "-metadata:s:a:0", "title=Original"]
@@ -2400,7 +2405,7 @@ class MainWindow(QWidget):
         self.sec_clip.body_layout.addLayout(r)
         self.lbl_clip_info = QLabel("选择左眼文件后可设置片段范围")
         self.lbl_clip_info.setObjectName("faintlabel")
-        self.lbl_clip_info.setContentsMargins(92, 0, 0, 4)
+        self.lbl_clip_info.setContentsMargins(68, 0, 0, 4)
         self.sec_clip.body_layout.addWidget(self.lbl_clip_info)
         root.addWidget(self.sec_clip)
 
@@ -2458,7 +2463,7 @@ class MainWindow(QWidget):
         r.addStretch(1)
         self.sec_enc.body_layout.addLayout(r)
         r = QHBoxLayout()
-        r.addWidget(mk_label("码率(M)"))
+        r.addWidget(mk_label("码率"))
         self.le_bitrate = QLineEdit(str(self.cfg.get("bitrate", 20)))
         self.le_bitrate.setFixedWidth(100)
         self.le_bitrate.setToolTip("目标平均码率（仅「目标平均码率 / 固定码率」模式有效）")
@@ -2467,7 +2472,7 @@ class MainWindow(QWidget):
         self.sec_enc.body_layout.addLayout(r)
         tip_enc = QLabel("提示：鼠标悬浮在「编码器 / 速度 / 质量模式 / 质量」上可查看各选项区别与建议")
         tip_enc.setObjectName("faintlabel")
-        tip_enc.setContentsMargins(92, 0, 0, 4)
+        tip_enc.setContentsMargins(68, 0, 0, 4)
         self.sec_enc.body_layout.addWidget(tip_enc)
         root.addWidget(self.sec_enc)
 
@@ -2516,14 +2521,14 @@ class MainWindow(QWidget):
             "外挂字幕一般与视频同目录（.sup / .pgs / .srt / .ass），选中左眼后自动探索，也可点「浏览」手动选择")
         tip_sub.setObjectName("faintlabel")
         tip_sub.setWordWrap(True)
-        tip_sub.setContentsMargins(92, 0, 0, 4)
+        tip_sub.setContentsMargins(68, 0, 0, 4)
         self.sec_sub.body_layout.addWidget(tip_sub)
         root.addWidget(self.sec_sub)
 
         # ---------- 高级 ----------
         self.sec_adv = Section("高级")
         r = QHBoxLayout()
-        r.addWidget(mk_label("关键帧间隔"))
+        r.addWidget(mk_label("关键帧"))
         self.le_gop = QLineEdit(str(self.cfg.get("gop", 96)))
         self.le_gop.setFixedWidth(100)
         r.addWidget(self.le_gop)
@@ -2531,7 +2536,7 @@ class MainWindow(QWidget):
         self.sec_adv.body_layout.addLayout(r)
 
         r = QHBoxLayout()
-        r.addWidget(mk_label("FFmpeg 版本"))
+        r.addWidget(mk_label("FFmpeg"))
         self.cmb_ffver = NoWheelComboBox()
         self.cmb_ffver.addItems([x[0] for x in FFMPEG_VERSIONS])
         self._set_combo(self.cmb_ffver, self.cfg.get("ffver", FFMPEG_VERSIONS[0][0]))
@@ -2541,7 +2546,7 @@ class MainWindow(QWidget):
         self.sec_adv.body_layout.addLayout(r)
         tip2 = QLabel("N 卡 NVENC 报「驱动版本不满足」时，可切换兼容版 8.0 或改选其他编码器")
         tip2.setObjectName("faintlabel")
-        tip2.setContentsMargins(92, 0, 0, 4)
+        tip2.setContentsMargins(68, 0, 0, 4)
         self.sec_adv.body_layout.addWidget(tip2)
 
         r = QHBoxLayout()
@@ -2720,7 +2725,8 @@ class MainWindow(QWidget):
     def _file_row(self, parent, label, le, browse_cmd, hint="", right_pad=0):
         row = QHBoxLayout()
         lb = QLabel(label)
-        lb.setFixedWidth(84)
+        lb.setFixedWidth(60)
+        lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         row.addWidget(lb)
         row.addWidget(le, 1)
         b = QPushButton("浏览")
@@ -2735,7 +2741,7 @@ class MainWindow(QWidget):
         parent.addLayout(row)
         h = QLabel(hint)
         h.setObjectName("faintlabel")
-        h.setContentsMargins(92, 0, 0, 4)
+        h.setContentsMargins(68, 0, 0, 4)
         parent.addWidget(h)
         return h
 
