@@ -27,6 +27,7 @@ import threading
 import subprocess
 
 from PySide6.QtCore import (Qt, QObject, Signal, QTimer, QRectF, QSize,
+                            QPointF,
                             QPropertyAnimation, QEasingCurve, QAbstractAnimation,
                             Property)
 from PySide6.QtGui import (QIcon, QFont, QPainter, QPainterPath, QColor, QPen,
@@ -40,7 +41,7 @@ from PySide6.QtWidgets import (
 import sublang
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.13"
+APP_VERSION = "v2.9.14"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -491,17 +492,19 @@ QLabel#plainlabel { color: transparent; background: transparent; padding: 3px 12
 QPlainTextEdit { background: #101114; border: 1px solid #2e3038; border-radius: 6px;
                  color: #ccced6; padding: 6px; }
 QListWidget#sublist { background: @INPUT@; border: 1px solid @INPUT_BORDER@;
-            border-radius: 6px; padding: 4px; outline: none;
-            alternate-background-color: @INPUT@; }
-QListWidget#sublist::item { border-radius: 5px; padding: 4px 8px;
-            min-height: 20px; color: @TEXT@; }
-QListWidget#sublist::item:hover { background: @HOVER@; }
-QListWidget#sublist::item:selected { background: @HOVER@; color: @TEXT@; }
-QListWidget#sublist::indicator { width: 16px; height: 16px; border-radius: 4px;
-            border: 1px solid @CHK_BORDER@; background: @CHK_BG@; }
-QListWidget#sublist::indicator:hover { border-color: @ACCENT@; }
-QListWidget#sublist::indicator:checked { background: @ACCENT@;
-            border-color: @ACCENT@; image: url("@ICONS@/check.svg"); }
+            border-radius: 8px; padding: 5px 4px; outline: none; }
+QListWidget#sublist::item { border: none; background: transparent; padding: 0px; }
+QListWidget#sublist QScrollBar:vertical { width: 8px; background: transparent;
+            margin: 2px; }
+QListWidget#sublist QScrollBar::handle:vertical { background: @SCROLL_HANDLE@;
+            border-radius: 4px; min-height: 24px; }
+QListWidget#sublist QScrollBar::handle:vertical:hover { background: @SCROLL_HANDLE_H@; }
+QListWidget#sublist QScrollBar::add-line:vertical { height: 0px; width: 0px; background: none; border: none; }
+QListWidget#sublist QScrollBar::sub-line:vertical { height: 0px; width: 0px; background: none; border: none; }
+QListWidget#sublist QScrollBar::up-arrow:vertical { width: 0px; height: 0px; background: none; }
+QListWidget#sublist QScrollBar::down-arrow:vertical { width: 0px; height: 0px; background: none; }
+QListWidget#sublist QScrollBar::add-page:vertical { background: none; }
+QListWidget#sublist QScrollBar::sub-page:vertical { background: none; }
 QDialog { background: @BG@; }
 QMessageBox { background: @CARD@; }
 QMessageBox QLabel { color: @TEXT@; background: transparent; }
@@ -2416,6 +2419,73 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
+class NoWheelListWidget(QListWidget):
+    """字幕列表：滚轮只滚动列表自身，滚到顶/底也不传递给整体页面"""
+
+    def wheelEvent(self, event):
+        super().wheelEvent(event)
+        event.accept()
+
+
+class SubItemDelegate(QStyledItemDelegate):
+    """字幕列表项自绘：圆角胶囊行 + 自绘勾选框（贴合整体 UI 风格）"""
+
+    ROW_H = 32
+
+    def sizeHint(self, option, index):
+        s = super().sizeHint(option, index)
+        s.setHeight(self.ROW_H)
+        return s
+
+    def paint(self, painter, option, index):
+        c = THEMES.get(_ACTIVE.get("theme", "dark"), THEMES["dark"])
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(option.rect).adjusted(4, 3, -4, -3)
+        checked = bool(index.data(Qt.UserRole + 1))
+        hover = bool(option.state & QStyle.State_MouseOver)
+        # 行背景：勾选=淡强调色胶囊；悬停=柔和高亮（均圆角）
+        if checked:
+            bg = QColor(c["accent"])
+            bg.setAlpha(40)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(bg)
+            painter.drawRoundedRect(r, 8, 8)
+        elif hover:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(c["hover"]))
+            painter.drawRoundedRect(r, 8, 8)
+        # 勾选框（自绘：完全可控，避免图标 DPR 偏移）
+        box = QRectF(r.left() + 10, r.center().y() - 9, 18, 18)
+        if checked:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(c["accent"]))
+            painter.drawRoundedRect(box, 5, 5)
+            pen = QPen(QColor("#ffffff"))
+            pen.setWidthF(2.0)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            cx, cy = box.center().x(), box.center().y()
+            painter.drawPolyline([
+                QPointF(cx - 4.2, cy + 0.3),
+                QPointF(cx - 1.3, cy + 3.2),
+                QPointF(cx + 4.4, cy - 3.3)])
+        else:
+            painter.setBrush(QColor(c["chk_bg"]))
+            painter.setPen(QPen(QColor(c["chk_border"]), 1.2))
+            painter.drawRoundedRect(box, 5, 5)
+        # 文本（勾选行加粗 + 亮色；未勾选柔灰）
+        f = QFont(option.font)
+        f.setBold(checked)
+        painter.setFont(f)
+        painter.setPen(QColor(c["text"] if checked else c["dim"]))
+        painter.drawText(r.adjusted(40, 0, -12, 0),
+                         Qt.AlignVCenter | Qt.AlignLeft,
+                         index.data(Qt.DisplayRole) or "")
+        painter.restore()
+
+
 class Section(QFrame):
     """可折叠设置区（Win11 Expander 风格：悬停高亮、圆角）"""
 
@@ -2775,23 +2845,42 @@ class MainWindow(QWidget):
         self.sec_sub = Section("字幕（可多选：整合多条字幕供播放器切换）")
         r = QHBoxLayout()
         r.addWidget(mk_label("整合字幕"))
-        self.sub_list = QListWidget()
+        self.sub_list = NoWheelListWidget()
         self.sub_list.setObjectName("sublist")
-        self.sub_list.setFixedHeight(88)
-        self.sub_list.setSpacing(1)
+        self.sub_list.setFixedHeight(146)
+        self.sub_list.setSpacing(2)
         self.sub_list.setUniformItemSizes(True)
         self.sub_list.setAlternatingRowColors(False)
-        self.sub_list.setSelectionMode(QListWidget.SingleSelection)
+        self.sub_list.setSelectionMode(QListWidget.NoSelection)
         self.sub_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sub_list.setTextElideMode(Qt.ElideRight)
+        self.sub_list.setItemDelegate(SubItemDelegate(self.sub_list))
+        # 控件级滚动条样式（最高优先级）：细窄、无箭头按钮
+        try:
+            self.sub_list.verticalScrollBar().setStyleSheet(
+                "QScrollBar:vertical { width: 8px; background: transparent;"
+                " margin: 2px 0px; border: none; }"
+                "QScrollBar::handle:vertical { background: #4a4e58;"
+                " border-radius: 4px; min-height: 28px; }"
+                "QScrollBar::handle:vertical:hover { background: #5a5e69; }"
+                "QScrollBar::add-line:vertical { height: 0px; width: 0px;"
+                " border: none; background: none; }"
+                "QScrollBar::sub-line:vertical { height: 0px; width: 0px;"
+                " border: none; background: none; }"
+                "QScrollBar::up-arrow:vertical { width: 0px; height: 0px; }"
+                "QScrollBar::down-arrow:vertical { width: 0px; height: 0px; }"
+                "QScrollBar::add-page:vertical { background: none; }"
+                "QScrollBar::sub-page:vertical { background: none; }")
+        except Exception:
+            pass
         self.sub_list.setToolTip(
             "勾选需要内嵌的字幕（可多选，播放器中可切换）。\n"
             "选择左眼文件后自动列出全部字幕轨；中文字幕会自动识别简体/繁体\n"
             "并显示内容样本，便于区分多条同语言字幕。\n"
             "全宽 SBS 输出时，PGS 字幕会自动处理为左右眼各一份（零视差）。")
         self.sub_list.setMinimumWidth(280)
-        self.sub_list.itemChanged.connect(self._on_sub_changed)
-        r.addWidget(self.sub_list, 2)
+        self.sub_list.itemClicked.connect(self._on_sub_item_clicked)
+        r.addWidget(self.sub_list, 1)
         self._sub_browse = QPushButton("浏览")
         self._sub_browse.setFixedWidth(64)
         self._sub_browse.setToolTip(
@@ -2799,7 +2888,6 @@ class MainWindow(QWidget):
             "作为自动探索失败时的保底方式")
         self._sub_browse.clicked.connect(self._pick_sub_file)
         r.addWidget(self._sub_browse)
-        r.addStretch(1)
         self.sec_sub.body_layout.addLayout(r)
         tip_sub = QLabel(
             "蓝光原盘的字幕内嵌在 BDMV\\STREAM\\*.m2ts（PGS 图形字幕，已自动列出）；"
@@ -3813,17 +3901,15 @@ class MainWindow(QWidget):
         for pos, label, lang in embedded or ():
             self.subtitle_tracks.append(("e", pos, lang, label))
             it = QListWidgetItem(label)
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(Qt.Unchecked)
             it.setData(Qt.UserRole, len(self.subtitle_tracks) - 1)
+            it.setData(Qt.UserRole + 1, False)
             self.sub_list.addItem(it)
         for path, label in external or ():
             lang = guess_sub_lang(os.path.basename(path))
             self.subtitle_tracks.append(("f", path, lang, label))
             it = QListWidgetItem(label)
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(Qt.Unchecked)
             it.setData(Qt.UserRole, len(self.subtitle_tracks) - 1)
+            it.setData(Qt.UserRole + 1, False)
             self.sub_list.addItem(it)
         if self.subtitle_tracks:
             self._log("检测到 %d 条可选字幕（内嵌 %d 条 + 外挂 %d 条，可多选）"
@@ -3852,7 +3938,7 @@ class MainWindow(QWidget):
         if pick is not None:
             it = self.sub_list.item(pick)
             if it is not None:
-                it.setCheckState(Qt.Checked)
+                it.setData(Qt.UserRole + 1, True)
             self._log("已默认勾选字幕：%s（可多选/改选）"
                       % self.subtitle_tracks[pick][3])
         self.sub_list.blockSignals(False)
@@ -3873,16 +3959,23 @@ class MainWindow(QWidget):
                                    SUB_LANG_NAMES.get(lang, lang))
         self.subtitle_tracks.append(("f", p, lang, label))
         it = QListWidgetItem(label)
-        it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-        it.setCheckState(Qt.Checked)
         it.setData(Qt.UserRole, len(self.subtitle_tracks) - 1)
+        it.setData(Qt.UserRole + 1, True)
         self.sub_list.blockSignals(True)
         self.sub_list.addItem(it)
         self.sub_list.blockSignals(False)
         self._log("已手动选择字幕文件：%s" % p)
         self._refresh_summaries()
 
-    def _on_sub_changed(self, _item):
+    def _on_sub_item_clicked(self, item):
+        """点击整行切换勾选（自绘复选框，不再依赖原生 indicator）"""
+        if item is None:
+            return
+        item.setData(Qt.UserRole + 1, not bool(item.data(Qt.UserRole + 1)))
+        try:
+            self.sub_list.viewport().update()
+        except Exception:
+            pass
         self._refresh_summaries()
 
     def _checked_subs(self):
@@ -3891,7 +3984,7 @@ class MainWindow(QWidget):
         try:
             for i in range(self.sub_list.count()):
                 it = self.sub_list.item(i)
-                if it is not None and it.checkState() == Qt.Checked:
+                if it is not None and bool(it.data(Qt.UserRole + 1)):
                     idx = it.data(Qt.UserRole)
                     if idx is not None:
                         out.append(int(idx))
