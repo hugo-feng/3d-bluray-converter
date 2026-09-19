@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.6"
+APP_VERSION = "v2.9.7"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -2763,6 +2763,27 @@ class MainWindow(QWidget):
         self._on_rc_change(self.cmb_rc.currentText())
         self._init_clip_range()
         self._refresh_summaries()
+        QTimer.singleShot(0, self._startup_log)
+
+    def _startup_log(self):
+        """启动时写固定日志（便于远程排查：程序版本 / 启动时间 / 工具链状态）"""
+        try:
+            logdir = os.path.join(_EXE_DIR, "log")
+            os.makedirs(logdir, exist_ok=True)
+            path = os.path.join(logdir, "启动日志.log")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("===== %s 启动（程序版本 %s）=====\n"
+                        % (time.strftime("%Y-%m-%d %H:%M:%S"), APP_VERSION))
+                f.write("  工具链：tsMuxeR %s / ffprobe %s / mkvmerge %s\n" % (
+                    "OK" if os.path.exists(TSMUXER) else "缺失",
+                    "OK" if os.path.exists(FFPROBE) else "缺失",
+                    "OK" if os.path.exists(os.path.join(BIN_DIR,
+                                                        "mkvmerge.exe"))
+                    else "缺失"))
+            self._log("程序版本：%s（启动信息已写入 log\\启动日志.log）"
+                      % APP_VERSION)
+        except Exception:
+            pass
         self._log("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
         self._src_timer.start()
         self._update_start_enabled()
@@ -3504,6 +3525,8 @@ class MainWindow(QWidget):
         for t in tracks:
             self.cmb_track.addItem(t[1])
         self._log("检测到 %d 条音轨" % len(tracks))
+        for t in tracks[:8]:
+            self._log("    音轨 %d：%s" % (t[0] + 1, t[1]))
 
     def _apply_subs(self, payload):
         """填充字幕下拉：内嵌 PGS（自动探测）+ 外挂字幕文件（自动探索）。
@@ -3528,6 +3551,8 @@ class MainWindow(QWidget):
             self._log("检测到 %d 条可选字幕（内嵌 %d 条 + 外挂 %d 条）"
                       % (len(self.subtitle_tracks), len(embedded or ()),
                          len(external or ())))
+            for i, (_k, _v, _lg, lab) in enumerate(self.subtitle_tracks[:12]):
+                self._log("    字幕 %d：%s" % (i + 1, lab))
         else:
             self._log("未检测到内嵌字幕，也未找到外挂字幕文件"
                       "（可点「浏览」手动选择字幕文件）")
