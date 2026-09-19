@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.9"
+APP_VERSION = "v2.9.10"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -253,6 +253,7 @@ def probe_encoder(encoder, speed, rc, qp, bitrate, gop, ffmpeg=None):
 def probe_duration(path):
     """读取媒体时长（秒）：优先 tsMuxeR 读头探测（对纯 MVC 从属流也是秒级），
     失败时回退 ffprobe。失败返回 0.0"""
+    path = native_path(path)
     try:
         r = run_hidden([TSMUXER, path], timeout=25)
         out = (r.stdout or "") + (r.stderr or "")
@@ -632,6 +633,18 @@ def fmt_size(nbytes):
     return "%.0f B" % n
 
 
+def native_path(p):
+    """Qt 文件对话框返回的路径使用正斜杠（如 I:/BDMV/...）；实测 tsMuxeR
+    在正斜杠路径下无法正确读取蓝光 CLPI 语言信息，导致字幕/音轨全部显示
+    「未标注」。统一转为本地分隔符（Windows 反斜杠）。"""
+    if not p:
+        return p
+    try:
+        return os.path.normpath(p)
+    except Exception:
+        return p
+
+
 def to_short_path(path):
     """转 8.3 短路径，规避 AviSynth 插件对非 ASCII 路径的兼容问题"""
     if os.name != "nt":
@@ -698,6 +711,7 @@ def ascii_workdir(preferred, name):
 
 def probe_stream_pid(path, kind):
     """用 tsMuxeR 探测指定类型（AVC/MVC）轨道的 PID"""
+    path = native_path(path)
     try:
         p = run_hidden([TSMUXER, path])
         cur = None
@@ -750,6 +764,7 @@ def _parse_ts_langs(txt):
 
 def probe_ts_audio_langs(m2ts):
     """tsMuxeR 读头取音轨语言；全部为空时自动重试一次（规避偶发读取异常）"""
+    m2ts = native_path(m2ts)
     langs = []
     for _attempt in range(2):
         try:
@@ -770,6 +785,7 @@ def probe_audio_tracks(m2ts):
     ffprobe 对全部音轨返回 und，而 tsMuxeR 能正确给出 eng/zho/fra/...）；
     编码与声道数：ffprobe。两个来源均按 PID 升序排列，序号一一对应。
     """
+    m2ts = native_path(m2ts)
     fb = []
     try:
         p = run_hidden(
@@ -815,6 +831,7 @@ def probe_subtitle_tracks(m2ts):
     返回 [(pos, label, lang), ...]；pos 为 ffmpeg 字幕流序号（与 PGS 排列顺序一致）。
     语言全部解析为空时自动重试一次（规避偶发读取异常导致的「未标注」）。
     """
+    m2ts = native_path(m2ts)
     last = []
     for attempt in range(2):
         try:
@@ -2397,8 +2414,8 @@ class MainWindow(QWidget):
         cv = QVBoxLayout(card)
         cv.setContentsMargins(14, 10, 14, 12)
         cv.setSpacing(6)
-        self.le_left = QLineEdit(self.cfg.get("left", ""))
-        self.le_right = QLineEdit(self.cfg.get("right", ""))
+        self.le_left = QLineEdit(native_path(self.cfg.get("left", "")))
+        self.le_right = QLineEdit(native_path(self.cfg.get("right", "")))
         self.le_out = QLineEdit("")  # 输出路径默认留空，由用户显式选择
         self._file_row(cv, "左眼文件", self.le_left, self.pick_left,
                        "BDMV\\STREAM 内的主视频流（如 00000.m2ts）")
@@ -3411,6 +3428,7 @@ class MainWindow(QWidget):
             os.path.dirname(self.le_left.text()) or "",
             "蓝光视频流 (*.m2ts *.mts);;所有文件 (*)")
         if p:
+            p = native_path(p)
             self._log("已选择左眼文件：%s" % p)
             self.le_left.setText(p)
             self.le_right.clear()
@@ -3423,6 +3441,7 @@ class MainWindow(QWidget):
             os.path.dirname(self.le_right.text()) or "",
             "蓝光视频流 (*.m2ts *.mts);;所有文件 (*)")
         if p:
+            p = native_path(p)
             self._log("已选择右眼文件：%s" % p)
             self.le_right.setText(p)
             self._auto_pair(p, False)
@@ -3432,7 +3451,7 @@ class MainWindow(QWidget):
             self, "保存输出文件", self.le_out.text() or "",
             "Matroska 视频 (*.mkv);;MP4 视频 (*.mp4)")
         if p:
-            self.le_out.setText(p)
+            self.le_out.setText(native_path(p))
 
     def _auto_pair(self, picked, is_left):
         d = os.path.dirname(picked)
@@ -3472,6 +3491,8 @@ class MainWindow(QWidget):
           3. 逐个用 tsMuxeR 读头核对时长（0.1~0.4 秒/个），命中即停，最多 24 个；
           4. 全过程写入日志，便于确认匹配依据。
         """
+        left_path = native_path(left_path)
+
         def work():
             d = os.path.dirname(left_path)
             ext = os.path.splitext(left_path)[1].lower()
@@ -3547,6 +3568,7 @@ class MainWindow(QWidget):
             self._log("未在左眼目录找到时长一致的同格式文件，请手动选择右眼")
 
     def _refresh_tracks(self, m2ts):
+        m2ts = native_path(m2ts)
         self._log("开始探测视频流：%s" % m2ts)
 
         def work():
@@ -3641,6 +3663,7 @@ class MainWindow(QWidget):
             "字幕文件 (*.sup *.pgs *.srt *.ass *.ssa);;所有文件 (*)")
         if not p:
             return
+        p = native_path(p)
         lang = guess_sub_lang(os.path.basename(p))
         label = "外挂：%s（%s）" % (os.path.basename(p),
                                    SUB_LANG_NAMES.get(lang, lang))
@@ -3996,9 +4019,9 @@ class MainWindow(QWidget):
         if self._concat_running:
             msg_info(self, "拼接任务进行中，请等待完成后再开始转换")
             return
-        left = self.le_left.text().strip()
-        right = self.le_right.text().strip()
-        out = self.le_out.text().strip()
+        left = native_path(self.le_left.text().strip())
+        right = native_path(self.le_right.text().strip())
+        out = native_path(self.le_out.text().strip())
         if not left or not os.path.exists(left):
             msg_err(self, "请选择有效的左眼视频流文件（.m2ts）")
             return
@@ -4402,6 +4425,7 @@ class MainWindow(QWidget):
 def probe_cli(path):
     """诊断模式（--probe <文件>）：把探测环境 / 原始输出 / 解析结果写入
     log\\probe_<时间戳>.log，便于远程排查「未标注」类问题。"""
+    path = native_path(path)
     logdir = os.path.join(_CFG_BASE, "log")
     try:
         os.makedirs(logdir, exist_ok=True)
@@ -4485,9 +4509,9 @@ def main():
             if flag in args:
                 return args[args.index(flag) + 1]
             return default
-        left = get("--left")
-        right = get("--right")
-        out = get("--out")
+        left = native_path(get("--left"))
+        right = native_path(get("--right"))
+        out = native_path(get("--out"))
         frames = int(get("--frames", "0") or 0)
         noaudio = "--noaudio" in args
         skipdemux = "--skipdemux" in args
