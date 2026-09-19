@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 import sublang
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.12"
+APP_VERSION = "v2.9.13"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -490,6 +490,18 @@ QLabel#warnlabel { color: @WARN@; background: @WARN_BG@; border-radius: 9px;
 QLabel#plainlabel { color: transparent; background: transparent; padding: 3px 12px; }
 QPlainTextEdit { background: #101114; border: 1px solid #2e3038; border-radius: 6px;
                  color: #ccced6; padding: 6px; }
+QListWidget#sublist { background: @INPUT@; border: 1px solid @INPUT_BORDER@;
+            border-radius: 6px; padding: 4px; outline: none;
+            alternate-background-color: @INPUT@; }
+QListWidget#sublist::item { border-radius: 5px; padding: 4px 8px;
+            min-height: 20px; color: @TEXT@; }
+QListWidget#sublist::item:hover { background: @HOVER@; }
+QListWidget#sublist::item:selected { background: @HOVER@; color: @TEXT@; }
+QListWidget#sublist::indicator { width: 16px; height: 16px; border-radius: 4px;
+            border: 1px solid @CHK_BORDER@; background: @CHK_BG@; }
+QListWidget#sublist::indicator:hover { border-color: @ACCENT@; }
+QListWidget#sublist::indicator:checked { background: @ACCENT@;
+            border-color: @ACCENT@; image: url("@ICONS@/check.svg"); }
 QDialog { background: @BG@; }
 QMessageBox { background: @CARD@; }
 QMessageBox QLabel { color: @TEXT@; background: transparent; }
@@ -2766,6 +2778,12 @@ class MainWindow(QWidget):
         self.sub_list = QListWidget()
         self.sub_list.setObjectName("sublist")
         self.sub_list.setFixedHeight(88)
+        self.sub_list.setSpacing(1)
+        self.sub_list.setUniformItemSizes(True)
+        self.sub_list.setAlternatingRowColors(False)
+        self.sub_list.setSelectionMode(QListWidget.SingleSelection)
+        self.sub_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sub_list.setTextElideMode(Qt.ElideRight)
         self.sub_list.setToolTip(
             "勾选需要内嵌的字幕（可多选，播放器中可切换）。\n"
             "选择左眼文件后自动列出全部字幕轨；中文字幕会自动识别简体/繁体\n"
@@ -3929,12 +3947,9 @@ class MainWindow(QWidget):
                 if not r:
                     continue
                 sc = r.get("script")
-                txt = (r.get("text") or "").strip()
                 tag = {"simplified": "·简体",
                        "traditional": "·繁体"}.get(sc, "")
                 new = label + tag
-                if txt:
-                    new += "  「%s」" % txt[:16]
                 self.subtitle_tracks[int(idx)] = (kind, val, lang, new)
                 it.setText(new)
             self._log("字幕语言识别完成（简繁与内容样本已更新到列表）")
@@ -4825,11 +4840,7 @@ def main():
                         tag = {"simplified": "·简体",
                                "traditional": "·繁体"}.get(
                                    r.get("script"), "")
-                        lbl = a[3] + tag
-                        txt = (r.get("text") or "").strip()[:16]
-                        if txt:
-                            lbl += "  「%s」" % txt
-                        _new.append((a[0], a[1], a[2], lbl))
+                        _new.append((a[0], a[1], a[2], a[3] + tag))
                     subtitle_args = _new
         except Exception:
             pass
