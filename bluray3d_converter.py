@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 import sublang
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.19"
+APP_VERSION = "v2.9.20"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -2423,9 +2423,9 @@ class NoWheelListWidget(QListWidget):
     """字幕列表：圆角主题背景（自绘）、平滑滚动、限流防惯性冲底；
     滚到顶/底不穿透到整体页面"""
 
-    LINE_PX = 24        # 每格滚轮像素（约 0.75 行）
+    LINE_PX = 30        # 每格滚轮像素（约 0.9 行）
     WIN_SEC = 0.30      # 限流窗口
-    WIN_MAX_PX = 120    # 窗口内最多滚动像素（约 3.7 行）
+    WIN_MAX_PX = 180    # 窗口内最多滚动像素（约 6 格，防惯性冲底）
 
     def __init__(self, parent=None):
         super().__init__(parent)
