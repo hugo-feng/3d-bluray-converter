@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 import sublang
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.14"
+APP_VERSION = "v2.9.15"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -2420,11 +2420,37 @@ class NoWheelComboBox(QComboBox):
 
 
 class NoWheelListWidget(QListWidget):
-    """字幕列表：滚轮只滚动列表自身，滚到顶/底也不传递给整体页面"""
+    """字幕列表：平滑滚动（动画过渡）；滚到顶/底也不传递给整体页面"""
+
+    STEP = 90
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._target = 0
+        self._anim = QPropertyAnimation(self.verticalScrollBar(), b"value",
+                                        self)
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
 
     def wheelEvent(self, event):
-        super().wheelEvent(event)
-        event.accept()
+        sb = self.verticalScrollBar()
+        dy = event.angleDelta().y()
+        try:
+            if dy != 0 and sb.maximum() > sb.minimum():
+                running = (self._anim.state()
+                           == QAbstractAnimation.State.Running)
+                base = self._target if running else sb.value()
+                target = max(sb.minimum(),
+                             min(base - (dy / 120.0) * self.STEP,
+                                 sb.maximum()))
+                self._target = target
+                self._anim.stop()
+                self._anim.setStartValue(sb.value())
+                self._anim.setEndValue(target)
+                self._anim.start()
+        except Exception:
+            super().wheelEvent(event)
+        event.accept()   # 无论如何消费滚动（防止穿透到整体页面）
 
 
 class SubItemDelegate(QStyledItemDelegate):
@@ -2855,24 +2881,6 @@ class MainWindow(QWidget):
         self.sub_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sub_list.setTextElideMode(Qt.ElideRight)
         self.sub_list.setItemDelegate(SubItemDelegate(self.sub_list))
-        # 控件级滚动条样式（最高优先级）：细窄、无箭头按钮
-        try:
-            self.sub_list.verticalScrollBar().setStyleSheet(
-                "QScrollBar:vertical { width: 8px; background: transparent;"
-                " margin: 2px 0px; border: none; }"
-                "QScrollBar::handle:vertical { background: #4a4e58;"
-                " border-radius: 4px; min-height: 28px; }"
-                "QScrollBar::handle:vertical:hover { background: #5a5e69; }"
-                "QScrollBar::add-line:vertical { height: 0px; width: 0px;"
-                " border: none; background: none; }"
-                "QScrollBar::sub-line:vertical { height: 0px; width: 0px;"
-                " border: none; background: none; }"
-                "QScrollBar::up-arrow:vertical { width: 0px; height: 0px; }"
-                "QScrollBar::down-arrow:vertical { width: 0px; height: 0px; }"
-                "QScrollBar::add-page:vertical { background: none; }"
-                "QScrollBar::sub-page:vertical { background: none; }")
-        except Exception:
-            pass
         self.sub_list.setToolTip(
             "勾选需要内嵌的字幕（可多选，播放器中可切换）。\n"
             "选择左眼文件后自动列出全部字幕轨；中文字幕会自动识别简体/繁体\n"
@@ -3364,6 +3372,36 @@ class MainWindow(QWidget):
             self.clip_slider.set_theme(self._theme)
         if getattr(self, "chk_clip", None) is not None:
             self.chk_clip.set_theme(self._theme)
+        # 字幕列表：QSS 对 QListWidget 视口背景不生效（Fusion 实测），
+        # 用 palette + 控件级滚动条样式双保险，保证深浅主题底色正确
+        try:
+            c = THEMES.get(self._theme, THEMES["dark"])
+            vp = self.sub_list.viewport()
+            pal = vp.palette()
+            pal.setColor(QPalette.Base, QColor(c["input"]))
+            pal.setColor(QPalette.Window, QColor(c["input"]))
+            pal.setColor(QPalette.Text, QColor(c["text"]))
+            pal.setColor(QPalette.Highlight, QColor(c["input"]))
+            vp.setPalette(pal)
+            vp.setAutoFillBackground(True)
+            vp.update()
+            self.sub_list.verticalScrollBar().setStyleSheet(
+                "QScrollBar:vertical { width: 8px; background: transparent;"
+                " margin: 2px 0px; border: none; }"
+                "QScrollBar::handle:vertical { background: %s;"
+                " border-radius: 4px; min-height: 28px; }"
+                "QScrollBar::handle:vertical:hover { background: %s; }"
+                "QScrollBar::add-line:vertical { height: 0px; width: 0px;"
+                " border: none; background: none; }"
+                "QScrollBar::sub-line:vertical { height: 0px; width: 0px;"
+                " border: none; background: none; }"
+                "QScrollBar::up-arrow:vertical { width: 0px; height: 0px; }"
+                "QScrollBar::down-arrow:vertical { width: 0px; height: 0px; }"
+                "QScrollBar::add-page:vertical { background: none; }"
+                "QScrollBar::sub-page:vertical { background: none; }"
+                % (c["scroll_handle"], c["scroll_handle_h"]))
+        except Exception:
+            pass
         if getattr(self, "_dur_pair", (None, None)) != (None, None):
             self._apply_dur_check(*self._dur_pair)
 
