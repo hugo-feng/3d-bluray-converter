@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.10"
+APP_VERSION = "v2.9.11"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -893,6 +893,115 @@ SUB_LANG_NAMES = {
     "en": "英语", "zh": "中文", "ja": "日语", "ko": "韩语", "cn": "中文",
 }
 
+def sbs_dualize_sup(src, dst):
+    """把 PGS 字幕转换为「左右眼各一份」格式（全宽 SBS 3840×1080 专用）。
+
+    BD3D 规范：字幕应位于双眼画面的相同位置（零视差）。SBS 转换后若放任
+    播放器自行渲染 1920×1080 的 PGS，字幕常会居中落在两眼接缝处。这里把
+    每个显示集（PCS）的合成对象复制一份、x 偏移 +半幅画布宽，并把窗口
+    （WDS）横向扩展到覆盖两份，使左右画面内各有一份相同字幕（各自居中）。
+    返回处理的显示集数量。
+    """
+    data = open(src, "rb").read()
+    # 第一遍：取原画布宽度作为水平偏移量（全片一致）
+    canvas_w = 1920
+    i = 0
+    while i + 13 <= len(data):
+        if data[i:i + 2] != b"PG":
+            i += 1
+            continue
+        typ = data[i + 10]
+        size = int.from_bytes(data[i + 11:i + 13], "big")
+        p = data[i + 13:i + 13 + size]
+        if typ == 0x16 and len(p) >= 2:
+            canvas_w = int.from_bytes(p[0:2], "big")
+            break
+        i += 13 + size
+
+    def proc_pcs(p):
+        if len(p) < 11:
+            return p, 0
+        w = int.from_bytes(p[0:2], "big")
+        nobj = p[10]
+        objs = []
+        o = 11
+        for _ in range(nobj):
+            if o + 8 > len(p):
+                break
+            oid = p[o:o + 2]
+            wid = p[o + 2]
+            crop = p[o + 3]
+            x = int.from_bytes(p[o + 4:o + 6], "big")
+            y = int.from_bytes(p[o + 6:o + 8], "big")
+            extra = b""
+            if crop & 0x80:
+                extra = p[o + 8:o + 16]
+                o += 16
+            else:
+                o += 8
+            objs.append((oid, wid, crop, x, y, extra))
+        head = bytearray(p[0:10])
+        head[0:2] = (w * 2).to_bytes(2, "big")
+        body = bytearray()
+        for (oid, wid, crop, x, y, ex) in objs:
+            body += oid + bytes([wid, crop]) + x.to_bytes(2, "big") \
+                + y.to_bytes(2, "big") + ex
+        for (oid, wid, crop, x, y, ex) in objs:
+            nx = min(x + w, 0xFFFF)
+            body += oid + bytes([wid, crop]) + nx.to_bytes(2, "big") \
+                + y.to_bytes(2, "big") + ex
+        return bytes(head) + bytes([len(objs) * 2]) + bytes(body), 1
+
+    def proc_wds(p):
+        if not p:
+            return p
+        n = p[0]
+        np_ = bytearray([n])
+        o = 1
+        for _ in range(n):
+            if o + 9 > len(p):
+                break
+            wid = p[o]
+            x = int.from_bytes(p[o + 1:o + 3], "big")
+            y = int.from_bytes(p[o + 3:o + 5], "big")
+            w = int.from_bytes(p[o + 5:o + 7], "big")
+            h = int.from_bytes(p[o + 7:o + 9], "big")
+            np_ += bytes([wid]) + x.to_bytes(2, "big") \
+                + y.to_bytes(2, "big") + (w + canvas_w).to_bytes(2, "big") \
+                + h.to_bytes(2, "big")
+            o += 9
+        return bytes(np_)
+
+    out = bytearray()
+    i = 0
+    n_pcs = 0
+    while i + 13 <= len(data):
+        if data[i:i + 2] != b"PG":
+            j = data.find(b"PG", i + 1)
+            if j < 0:
+                out += data[i:]
+                break
+            out += data[i:j]
+            i = j
+            continue
+        pts = data[i + 2:i + 6]
+        dts = data[i + 6:i + 10]
+        typ = data[i + 10]
+        size = int.from_bytes(data[i + 11:i + 13], "big")
+        payload = data[i + 13:i + 13 + size]
+        if typ == 0x16:
+            payload, k = proc_pcs(payload)
+            n_pcs += k
+        elif typ == 0x17:
+            payload = proc_wds(payload)
+        out += b"PG" + pts + dts + bytes([typ]) \
+            + len(payload).to_bytes(2, "big") + payload
+        i += 13 + size
+    with open(dst, "wb") as f:
+        f.write(bytes(out))
+    return n_pcs
+
+
 SUB_EXTS = (".sup", ".pgs", ".srt", ".ass", ".ssa")
 
 
@@ -1005,6 +1114,23 @@ class ConvertJob(threading.Thread):
                 p.terminate()
             except Exception:
                 pass
+
+    def _sub_maybe_sbs(self, path):
+        """全宽 SBS 布局时把 PGS 字幕转换为「左右眼各一份」；其它情况原样返回"""
+        if self.layout != "full_sbs":
+            return path
+        if not path.lower().endswith((".sup", ".pgs")):
+            return path
+        try:
+            dual = os.path.join(self.workdir, "subtitle_sbs.sup")
+            n = sbs_dualize_sup(path, dual)
+            if n and os.path.exists(dual) and os.path.getsize(dual) > 0:
+                self._log("字幕已转换为 SBS 双眼格式"
+                          "（左右画面各一份，%d 个显示集）" % n)
+                return dual
+        except Exception as e:
+            self._log("字幕 SBS 转换失败，使用原字幕：%s" % e)
+        return path
 
     def pause(self):
         """暂停：挂起当前子进程，进度保留（支持断点续转）"""
@@ -1525,7 +1651,7 @@ class ConvertJob(threading.Thread):
                 self._log("提示：MP4 容器不支持 PGS 字幕，本次未整合字幕")
             elif kind == "f":
                 if os.path.exists(sval):
-                    sub_file = sval
+                    sub_file = self._sub_maybe_sbs(sval)
                     self._log("使用外挂字幕文件：%s" % sval)
                 else:
                     self._log("字幕文件不存在，本次未整合字幕：%s" % sval)
@@ -1555,7 +1681,7 @@ class ConvertJob(threading.Thread):
                 self._check()
                 if p.returncode == 0 and os.path.exists(sub_path) \
                         and os.path.getsize(sub_path) > 0:
-                    sub_file = sub_path
+                    sub_file = self._sub_maybe_sbs(sub_path)
                     self._log("字幕提取完成：%s" % fmt_size(
                         os.path.getsize(sub_path)))
                 else:
@@ -1613,7 +1739,11 @@ class ConvertJob(threading.Thread):
 
         # ---- 阶段 2C：混流（纯顺序 I/O）----
         t_mux = time.time()
+        # -copyts：保持各输入的原始时间戳。若不加，ffmpeg 会以每个输入的
+        # 首个时间戳为基准整体平移——sup 字幕的首个显示集通常不在 0 秒
+        # （片头几十秒无字幕），会被错误地平移到 0，导致字幕比画面提前。
         cmd = [self.ffmpeg, "-hide_banner", "-y", "-nostats", "-progress", "pipe:1",
+               "-copyts",
                "-i", tmp_video]
         for a in audio_files:
             cmd += ["-i", a]
