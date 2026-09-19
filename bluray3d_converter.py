@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.7"
+APP_VERSION = "v2.9.9"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -719,6 +719,50 @@ def probe_stream_pid(path, kind):
     return 4113 if kind == "AVC" else 4114
 
 
+def _parse_ts_langs(txt):
+    """从 tsMuxeR 读头输出中解析音轨语言列表（按 PID 升序）"""
+    ts_langs = []
+    cur = {}
+    hinted = ("DTS", "AC3", "EAC3", "TRUEHD", "LPCM", "AAC", "MPEG",
+              "PCM", "MLP")
+    for ln in txt.splitlines():
+        ln = ln.strip()
+        m = re.match(r"Track ID:\s*(\d+)", ln)
+        if m:
+            if cur.get("type") and any(h in cur["type"].upper()
+                                       for h in hinted):
+                ts_langs.append(cur.get("lang") or "")
+            cur = {"pid": int(m.group(1))}
+            continue
+        if "pid" not in cur:
+            continue
+        m = re.match(r"Stream type:\s*(.+)", ln)
+        if m:
+            cur["type"] = m.group(1).strip()
+            continue
+        m = re.match(r"Stream lang:\s*(.*)", ln)
+        if m:
+            cur["lang"] = m.group(1).strip()
+    if cur.get("type") and any(h in cur["type"].upper() for h in hinted):
+        ts_langs.append(cur.get("lang") or "")
+    return ts_langs
+
+
+def probe_ts_audio_langs(m2ts):
+    """tsMuxeR 读头取音轨语言；全部为空时自动重试一次（规避偶发读取异常）"""
+    langs = []
+    for _attempt in range(2):
+        try:
+            p = run_hidden([TSMUXER, m2ts], timeout=30)
+            langs = _parse_ts_langs((p.stdout or "") + (p.stderr or ""))
+        except Exception:
+            return langs
+        if langs and any(langs):
+            return langs
+        time.sleep(0.4)
+    return langs
+
+
 def probe_audio_tracks(m2ts):
     """返回 [(pos, label, codec, channels, lang), ...]
 
@@ -741,35 +785,7 @@ def probe_audio_tracks(m2ts):
             })
     except Exception:
         fb = []
-    ts_langs = []
-    try:
-        p = run_hidden([TSMUXER, m2ts], timeout=30)
-        txt = (p.stdout or "") + (p.stderr or "")
-        cur = {}
-        hinted = ("DTS", "AC3", "EAC3", "TRUEHD", "LPCM", "AAC", "MPEG",
-                  "PCM", "MLP")
-        for ln in txt.splitlines():
-            ln = ln.strip()
-            m = re.match(r"Track ID:\s*(\d+)", ln)
-            if m:
-                if cur.get("type") and any(h in cur["type"].upper()
-                                           for h in hinted):
-                    ts_langs.append(cur.get("lang") or "")
-                cur = {"pid": int(m.group(1))}
-                continue
-            if "pid" not in cur:
-                continue
-            m = re.match(r"Stream type:\s*(.+)", ln)
-            if m:
-                cur["type"] = m.group(1).strip()
-                continue
-            m = re.match(r"Stream lang:\s*(.*)", ln)
-            if m:
-                cur["lang"] = m.group(1).strip()
-        if cur.get("type") and any(h in cur["type"].upper() for h in hinted):
-            ts_langs.append(cur.get("lang") or "")
-    except Exception:
-        ts_langs = []
+    ts_langs = probe_ts_audio_langs(m2ts)
     tracks = []
     n = max(len(fb), len(ts_langs))
     for pos in range(n):
@@ -797,47 +813,54 @@ def probe_subtitle_tracks(m2ts):
     """用 tsMuxeR 读头探测内嵌 PGS 字幕轨（蓝光盘的完整语言信息优于 ffprobe）。
 
     返回 [(pos, label, lang), ...]；pos 为 ffmpeg 字幕流序号（与 PGS 排列顺序一致）。
+    语言全部解析为空时自动重试一次（规避偶发读取异常导致的「未标注」）。
     """
-    try:
-        p = run_hidden([TSMUXER, m2ts], timeout=30)
-        out = (p.stdout or "") + (p.stderr or "")
-    except Exception:
-        return []
-    raw = []
-    cur = {}
-    for ln in out.splitlines():
-        ln = ln.strip()
-        m = re.match(r"Track ID:\s*(\d+)", ln)
-        if m:
-            if cur.get("type") == "PGS":
-                raw.append(cur)
-            cur = {"pid": int(m.group(1))}
-            continue
-        if "pid" not in cur:
-            continue
-        m = re.match(r"Stream type:\s*(.+)", ln)
-        if m:
-            cur["type"] = m.group(1).strip().upper()
-            continue
-        m = re.match(r"Stream info:\s*(.+)", ln)
-        if m:
-            cur["info"] = m.group(1).strip()
-            continue
-        m = re.match(r"Stream lang:\s*(.*)", ln)
-        if m:
-            cur["lang"] = m.group(1).strip()
-    if cur.get("type") == "PGS":
-        raw.append(cur)
-    tracks = []
-    for pos, t in enumerate(raw):
-        lang = t.get("lang") or "und"
-        name = SUB_LANG_NAMES.get(lang, lang)
-        extra = ""
-        m = re.search(r"Resolution:\s*(\d+):(\d+)", t.get("info", ""))
-        if m:
-            extra = "（%s×%s）" % (m.group(1), m.group(2))
-        tracks.append((pos, "#%d %s PGS%s" % (pos + 1, name, extra), lang))
-    return tracks
+    last = []
+    for attempt in range(2):
+        try:
+            p = run_hidden([TSMUXER, m2ts], timeout=30)
+            out = (p.stdout or "") + (p.stderr or "")
+        except Exception:
+            return last
+        raw = []
+        cur = {}
+        for ln in out.splitlines():
+            ln = ln.strip()
+            m = re.match(r"Track ID:\s*(\d+)", ln)
+            if m:
+                if cur.get("type") == "PGS":
+                    raw.append(cur)
+                cur = {"pid": int(m.group(1))}
+                continue
+            if "pid" not in cur:
+                continue
+            m = re.match(r"Stream type:\s*(.+)", ln)
+            if m:
+                cur["type"] = m.group(1).strip().upper()
+                continue
+            m = re.match(r"Stream info:\s*(.+)", ln)
+            if m:
+                cur["info"] = m.group(1).strip()
+                continue
+            m = re.match(r"Stream lang:\s*(.*)", ln)
+            if m:
+                cur["lang"] = m.group(1).strip()
+        if cur.get("type") == "PGS":
+            raw.append(cur)
+        tracks = []
+        for pos, t in enumerate(raw):
+            lang = t.get("lang") or "und"
+            name = SUB_LANG_NAMES.get(lang, lang)
+            extra = ""
+            m = re.search(r"Resolution:\s*(\d+):(\d+)", t.get("info", ""))
+            if m:
+                extra = "（%s×%s）" % (m.group(1), m.group(2))
+            tracks.append((pos, "#%d %s PGS%s" % (pos + 1, name, extra), lang))
+        last = tracks
+        if not tracks or any(t[2] and t[2] != "und" for t in tracks):
+            return tracks
+        time.sleep(0.4)
+    return last
 
 
 SUB_LANG_NAMES = {
@@ -2766,24 +2789,37 @@ class MainWindow(QWidget):
         QTimer.singleShot(0, self._startup_log)
 
     def _startup_log(self):
-        """启动时写固定日志（便于远程排查：程序版本 / 启动时间 / 工具链状态）"""
+        """软件启动即创建「运行日志」（总日志，追加）；每个任务的日志另行生成。
+
+        运行日志记录程序运行期间的全部界面日志（探测 / 错误 / 状态），
+        与「<成品名>_<时间戳>.log」形式的任务日志区分开，便于排查问题。
+        """
+        self._runlog_h = None
         try:
-            logdir = os.path.join(_EXE_DIR, "log")
+            logdir = os.path.join(_CFG_BASE, "log")
             os.makedirs(logdir, exist_ok=True)
-            path = os.path.join(logdir, "启动日志.log")
-            with open(path, "a", encoding="utf-8") as f:
-                f.write("===== %s 启动（程序版本 %s）=====\n"
-                        % (time.strftime("%Y-%m-%d %H:%M:%S"), APP_VERSION))
-                f.write("  工具链：tsMuxeR %s / ffprobe %s / mkvmerge %s\n" % (
+            path = os.path.join(logdir, "运行日志.log")
+            if os.path.exists(path) and os.path.getsize(path) > 3 * 1024 * 1024:
+                try:
+                    os.replace(path, os.path.join(logdir, "运行日志_old.log"))
+                except Exception:
+                    pass
+            self._runlog_h = open(path, "a", encoding="utf-8")
+            self._runlog_h.write(
+                "\n" + "=" * 20 + " 程序启动 %s（版本 %s）" % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"), APP_VERSION)
+                + "=" * 20 + "\n")
+            self._runlog_h.write(
+                "工具链：tsMuxeR %s / ffprobe %s / mkvmerge %s\n" % (
                     "OK" if os.path.exists(TSMUXER) else "缺失",
                     "OK" if os.path.exists(FFPROBE) else "缺失",
                     "OK" if os.path.exists(os.path.join(BIN_DIR,
                                                         "mkvmerge.exe"))
                     else "缺失"))
-            self._log("程序版本：%s（启动信息已写入 log\\启动日志.log）"
-                      % APP_VERSION)
+            self._runlog_h.flush()
         except Exception:
-            pass
+            self._runlog_h = None
+        self._log("程序版本：%s（运行日志：log\\运行日志.log）" % APP_VERSION)
         self._log("就绪。选择左眼/右眼视频流文件与输出路径后点击「开始转换」。")
         self._src_timer.start()
         self._update_start_enabled()
@@ -3375,6 +3411,7 @@ class MainWindow(QWidget):
             os.path.dirname(self.le_left.text()) or "",
             "蓝光视频流 (*.m2ts *.mts);;所有文件 (*)")
         if p:
+            self._log("已选择左眼文件：%s" % p)
             self.le_left.setText(p)
             self.le_right.clear()
             self._auto_match_right(p)
@@ -3386,6 +3423,7 @@ class MainWindow(QWidget):
             os.path.dirname(self.le_right.text()) or "",
             "蓝光视频流 (*.m2ts *.mts);;所有文件 (*)")
         if p:
+            self._log("已选择右眼文件：%s" % p)
             self.le_right.setText(p)
             self._auto_pair(p, False)
 
@@ -3509,13 +3547,31 @@ class MainWindow(QWidget):
             self._log("未在左眼目录找到时长一致的同格式文件，请手动选择右眼")
 
     def _refresh_tracks(self, m2ts):
+        self._log("开始探测视频流：%s" % m2ts)
+
         def work():
             tracks = probe_audio_tracks(m2ts)
             if tracks:
                 self.bridge.tracks.emit(tracks)
             embedded = probe_subtitle_tracks(m2ts)
             external = find_external_subs(m2ts)
+            # 诊断：若字幕语言全部为空，记录 tsMuxeR 原始关键行（便于排查「未标注」）
+            try:
+                if embedded and not any(
+                        t[2] and t[2] != "und" for t in embedded):
+                    p = run_hidden([TSMUXER, m2ts], timeout=30)
+                    raw = (p.stdout or "") + (p.stderr or "")
+                    key = [ln.strip() for ln in raw.splitlines()
+                           if ln.strip().startswith(
+                               ("Track ID", "Stream type", "Stream lang"))]
+                    self.bridge.log.emit(
+                        "诊断：字幕语言解析为空，附 tsMuxeR 原始输出关键行：")
+                    for ln in key[:48]:
+                        self.bridge.log.emit("        " + ln)
+            except Exception as e:
+                self.bridge.log.emit("诊断信息采集失败：%r" % e)
             self.bridge.subs.emit((embedded, external))
+
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_tracks(self, tracks):
@@ -3597,13 +3653,14 @@ class MainWindow(QWidget):
     def _log(self, s):
         line = time.strftime("[%Y-%m-%d %H:%M:%S] ") + s
         self.log.appendPlainText(line)
-        fh = getattr(self, "_log_fh", None)
-        if fh is not None:
-            try:
-                fh.write(line + "\n")
-                fh.flush()
-            except Exception:
-                pass
+        for fh in (getattr(self, "_log_fh", None),
+                   getattr(self, "_runlog_h", None)):
+            if fh is not None:
+                try:
+                    fh.write(line + "\n")
+                    fh.flush()
+                except Exception:
+                    pass
 
     def _progress(self, stage, pct, info, stage_remain=-1.0):
         self.pb.setValue(int(max(0.0, min(pct, 100.0)) * 10))
@@ -4333,11 +4390,96 @@ class MainWindow(QWidget):
             if self.job:
                 self.job.cancel()
         self._close_log()
+        fh = getattr(self, "_runlog_h", None)
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
         event.accept()
+
+
+def probe_cli(path):
+    """诊断模式（--probe <文件>）：把探测环境 / 原始输出 / 解析结果写入
+    log\\probe_<时间戳>.log，便于远程排查「未标注」类问题。"""
+    logdir = os.path.join(_CFG_BASE, "log")
+    try:
+        os.makedirs(logdir, exist_ok=True)
+    except Exception:
+        logdir = _CFG_BASE
+    fn = os.path.join(logdir, "probe_%s.log" % time.strftime("%Y%m%d_%H%M%S"))
+    L = []
+    L.append("诊断模式 --probe（程序版本 %s）" % APP_VERSION)
+    L.append("时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
+    L.append("目标文件: %s" % path)
+    try:
+        L.append("文件存在: %s  大小: %s" % (
+            os.path.exists(path), fmt_size(os.path.getsize(path))))
+    except Exception as e:
+        L.append("文件信息异常: %r" % e)
+    L.append("TSMUXER = %s（存在 %s）" % (TSMUXER, os.path.exists(TSMUXER)))
+    L.append("FFPROBE = %s（存在 %s）" % (FFPROBE, os.path.exists(FFPROBE)))
+    L.append("工作目录 = %s" % os.getcwd())
+    L.append("")
+    # ---- tsMuxeR 原始输出 ----
+    try:
+        t0 = time.time()
+        p = run_hidden([TSMUXER, path], timeout=120)
+        dt = time.time() - t0
+        raw = p.stdout or ""
+        err = p.stderr or ""
+        L.append("== tsMuxeR 读头（耗时 %.1f 秒，返回码 %s，"
+                 "stdout %d 字符，stderr %d 字符）==" % (
+                     dt, p.returncode, len(raw), len(err)))
+        L.append(raw)
+        if err:
+            L.append("---- stderr ----")
+            L.append(err)
+    except Exception as e:
+        L.append("tsMuxeR 执行异常: %r" % e)
+    L.append("")
+    # ---- 解析结果 ----
+    try:
+        subs = probe_subtitle_tracks(path)
+        L.append("== probe_subtitle_tracks（%d 条）==" % len(subs))
+        for t in subs:
+            L.append("    pos=%s  lang=%s  label=%s" % (t[0], t[2], t[1]))
+    except Exception as e:
+        L.append("probe_subtitle_tracks 异常: %r" % e)
+    try:
+        trs = probe_audio_tracks(path)
+        L.append("== probe_audio_tracks（%d 条）==" % len(trs))
+        for t in trs:
+            L.append("    pos=%s  lang=%s  label=%s" % (t[0], t[4], t[1]))
+    except Exception as e:
+        L.append("probe_audio_tracks 异常: %r" % e)
+    L.append("")
+    # ---- ffprobe 原始（字幕流）----
+    try:
+        p = run_hidden(
+            [FFPROBE, "-v", "error", "-select_streams", "s",
+             "-show_entries", "stream=codec_name:stream_tags=language",
+             "-of", "json", path], timeout=120)
+        L.append("== ffprobe 字幕流原始输出 ==")
+        L.append(p.stdout or "")
+    except Exception as e:
+        L.append("ffprobe 异常: %r" % e)
+    text = "\n".join(L)
+    with open(fn, "w", encoding="utf-8") as f:
+        f.write(text)
+    try:
+        print(text)
+        print("PROBE LOG -> %s" % fn)
+    except Exception:
+        pass
+    return 0
 
 
 def main():
     args = sys.argv[1:]
+    if "--probe" in args:
+        i = args.index("--probe")
+        return probe_cli(args[i + 1] if i + 1 < len(args) else "")
     if "--cli" in args:
         def get(flag, default=None):
             if flag in args:
@@ -4411,8 +4553,51 @@ def main():
     win._apply_theme()
     win.show()
     if "--selftest" in args:
+        _st = {"msg": "", "round": 0, "extra": ""}
+
+        def _write_selftest():
+            try:
+                with open(os.path.join(_CFG_BASE, "selftest.log"), "w",
+                          encoding="utf-8") as f:
+                    f.write(_st["msg"] + _st["extra"] + "\nBIN_DIR=" + BIN_DIR + "\n")
+            except Exception:
+                pass
+            try:
+                print(_st["msg"] + _st["extra"], flush=True)
+            except Exception:
+                pass
+            app.quit()
+
+        def _probe_round_done():
+            subs = [win.cmb_sub.itemText(i) for i in range(win.cmb_sub.count())]
+            trks = [win.cmb_track.itemText(i) for i in range(win.cmb_track.count())]
+            _st["extra"] += (
+                "\n== GUI 探测复现（第 %d 轮）==\n字幕下拉(%d): %s\n音轨下拉(%d): %s\n"
+                % (_st["round"], len(subs), " | ".join(subs),
+                   len(trks), " | ".join(trks)))
+            if _st["round"] < 3:
+                _st["round"] += 1
+                QTimer.singleShot(2500, _start_probe_round)
+            else:
+                _st["extra"] += "\n--- 界面日志 ---\n" + win.log.toPlainText()
+                _write_selftest()
+
+        def _start_probe_round():
+            try:
+                _p = r"I:\BDMV\STREAM\00001.m2ts"
+                if os.path.exists(_p):
+                    win.le_left.setText(_p)
+                    win.le_right.clear()
+                    win._auto_match_right(_p)
+                    win._refresh_tracks(_p)
+                    QTimer.singleShot(20000, _probe_round_done)
+                    return
+            except Exception as e:
+                _st["msg"] += " | PROBE EXC: %r" % e
+            _st["extra"] += "\n--- 界面日志 ---\n" + win.log.toPlainText()
+            _write_selftest()
+
         def _check():
-            msg = ""
             try:
                 win.sec_fmt.toggle()
                 assert win.sec_fmt._expanded, "折叠区展开失败"
@@ -4426,17 +4611,14 @@ def main():
                 _p1 = icon_pixmap("chevron-right.svg")
                 _p2 = icon_pixmap("chevron-down.svg")
                 assert _p1 is not None and _p2 is not None, "图标加载失败: " + ICONS_DIR
-                msg = "SELFTEST OK"
+                _st["msg"] = "SELFTEST OK"
             except Exception as e:
-                msg = "SELFTEST FAIL: %s" % e
-            try:
-                with open(os.path.join(_CFG_BASE, "selftest.log"), "w",
-                          encoding="utf-8") as f:
-                    f.write(msg + "\nBIN_DIR=" + BIN_DIR + "\n")
-            except Exception:
-                pass
-            print(msg, flush=True)
-            app.quit()
+                _st["msg"] = "SELFTEST FAIL: %s" % e
+                _write_selftest()
+                return
+            _st["round"] = 1
+            _start_probe_round()
+
         QTimer.singleShot(500, _check)
     return app.exec()
 
