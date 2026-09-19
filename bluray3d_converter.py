@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 import sublang
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.17"
+APP_VERSION = "v2.9.19"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -2420,12 +2420,18 @@ class NoWheelComboBox(QComboBox):
 
 
 class NoWheelListWidget(QListWidget):
-    """字幕列表：圆角主题背景（自绘）、平滑滚动；滚到顶/底不穿透到整体页面"""
+    """字幕列表：圆角主题背景（自绘）、平滑滚动、限流防惯性冲底；
+    滚到顶/底不穿透到整体页面"""
 
-    STEP = 30   # 每格滚轮像素基准（约 0.9 行）
+    LINE_PX = 24        # 每格滚轮像素（约 0.75 行）
+    WIN_SEC = 0.30      # 限流窗口
+    WIN_MAX_PX = 120    # 窗口内最多滚动像素（约 3.7 行）
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 按像素滚动（默认 ScrollPerItem 会让"像素值"被当作项索引，
+        # 表现为滚一格直接到底；平滑动画也必须基于像素）
+        self.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         self.setFrameShape(QFrame.NoFrame)              # 去掉原生边线（黑线）
         self.setAttribute(Qt.WA_StyledBackground, True)  # 由样式表绘制圆角背景
         vp = self.viewport()
@@ -2435,6 +2441,8 @@ class NoWheelListWidget(QListWidget):
         pal.setColor(QPalette.Window, QColor(0, 0, 0, 0))
         vp.setPalette(pal)
         self._target = 0
+        self._win_start = 0.0
+        self._win_used = 0.0
         self._anim = QPropertyAnimation(self.verticalScrollBar(), b"value",
                                         self)
         self._anim.setDuration(200)
@@ -2448,15 +2456,28 @@ class NoWheelListWidget(QListWidget):
             return
         try:
             if sb.maximum() > sb.minimum():
+                now = time.monotonic()
+                # 限流窗口：无论滚轮发多少事件（惯性/高精度），每窗口最多
+                # WIN_MAX_PX，避免"轻轻一滚划过整张列表"
+                if now - self._win_start > self.WIN_SEC:
+                    self._win_start = now
+                    self._win_used = 0.0
+                notches = max(-3.0, min(3.0, dy / 120.0))
+                want = -notches * self.LINE_PX   # 上滚减小、下滚增大
+                remain = self.WIN_MAX_PX - self._win_used
+                if remain <= 0.5:
+                    event.accept()
+                    return
+                delta = max(-remain, min(remain, want))
+                if abs(delta) < 0.5:
+                    event.accept()
+                    return
+                self._win_used += abs(delta)
                 running = (self._anim.state()
                            == QAbstractAnimation.State.Running)
                 base = self._target if running else sb.value()
-                # 按滚动量比例换算：兼容高精度滚轮（一次物理滚动发出多个
-                # 小 delta 事件，逐事件按 120 基准换算，总量自然累计），
-                # 单次事件限幅 1.2 格；方向：上滚减小（看更早内容）、下滚增大
-                steps = max(-1.2, min(1.2, dy / 120.0))
                 target = max(sb.minimum(),
-                             min(base - steps * self.STEP, sb.maximum()))
+                             min(base + delta, sb.maximum()))
                 self._target = target
                 self._anim.stop()
                 self._anim.setStartValue(sb.value())
@@ -2889,7 +2910,8 @@ class MainWindow(QWidget):
         self.sub_list.setObjectName("sublist")
         self.sub_list.setFixedHeight(146)
         self.sub_list.setSpacing(2)
-        self.sub_list.setUniformItemSizes(True)
+        self.sub_list.setUniformItemSizes(False)   # 必须 False：统一尺寸缓存
+        # 会用默认行高计算滚动范围（实测滚一格直接到底）
         self.sub_list.setAlternatingRowColors(False)
         self.sub_list.setSelectionMode(QListWidget.NoSelection)
         self.sub_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -3998,6 +4020,10 @@ class MainWindow(QWidget):
             self._log("已默认勾选字幕：%s（可多选/改选）"
                       % self.subtitle_tracks[pick][3])
         self.sub_list.blockSignals(False)
+        try:
+            self.sub_list.scheduleDelayedItemsLayout()   # 按真实行高重算滚动范围
+        except Exception:
+            pass
         self._refresh_summaries()
         self._start_script_detect(embedded or ())
 
