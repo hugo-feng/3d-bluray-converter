@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QAbstractScrollArea)
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.5"
+APP_VERSION = "v2.9.6"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -720,23 +720,76 @@ def probe_stream_pid(path, kind):
 
 
 def probe_audio_tracks(m2ts):
-    """返回 [(pos, label, codec, channels, lang), ...]"""
+    """返回 [(pos, label, codec, channels, lang), ...]
+
+    语言：优先 tsMuxeR 读头（对蓝光 PMT 语言描述符识别最完整——实测部分盘
+    ffprobe 对全部音轨返回 und，而 tsMuxeR 能正确给出 eng/zho/fra/...）；
+    编码与声道数：ffprobe。两个来源均按 PID 升序排列，序号一一对应。
+    """
+    fb = []
     try:
         p = run_hidden(
             [FFPROBE, "-v", "error", "-select_streams", "a",
              "-show_entries", "stream=codec_name,channels:stream_tags=language",
-             "-of", "json", m2ts])
+             "-of", "json", m2ts], timeout=90)
         streams = json.loads(p.stdout).get("streams", [])
+        for pos, s in enumerate(streams):
+            fb.append({
+                "codec": s.get("codec_name", "?"),
+                "ch": int(s.get("channels") or 0),
+                "lang": (s.get("tags") or {}).get("language", "und"),
+            })
     except Exception:
-        return []
+        fb = []
+    ts_langs = []
+    try:
+        p = run_hidden([TSMUXER, m2ts], timeout=30)
+        txt = (p.stdout or "") + (p.stderr or "")
+        cur = {}
+        hinted = ("DTS", "AC3", "EAC3", "TRUEHD", "LPCM", "AAC", "MPEG",
+                  "PCM", "MLP")
+        for ln in txt.splitlines():
+            ln = ln.strip()
+            m = re.match(r"Track ID:\s*(\d+)", ln)
+            if m:
+                if cur.get("type") and any(h in cur["type"].upper()
+                                           for h in hinted):
+                    ts_langs.append(cur.get("lang") or "")
+                cur = {"pid": int(m.group(1))}
+                continue
+            if "pid" not in cur:
+                continue
+            m = re.match(r"Stream type:\s*(.+)", ln)
+            if m:
+                cur["type"] = m.group(1).strip()
+                continue
+            m = re.match(r"Stream lang:\s*(.*)", ln)
+            if m:
+                cur["lang"] = m.group(1).strip()
+        if cur.get("type") and any(h in cur["type"].upper() for h in hinted):
+            ts_langs.append(cur.get("lang") or "")
+    except Exception:
+        ts_langs = []
     tracks = []
-    for pos, s in enumerate(streams):
-        codec = s.get("codec_name", "?")
-        ch = int(s.get("channels") or 0)
-        lang = (s.get("tags") or {}).get("language", "und")
-        label = "#%d  %s  %d.%d  %s" % (pos + 1, lang, ch - 2 if ch >= 2 else 0,
-                                        1, codec)
-        tracks.append((pos, label, codec, ch, lang))
+    n = max(len(fb), len(ts_langs))
+    for pos in range(n):
+        f = fb[pos] if pos < len(fb) else {"codec": "?", "ch": 0, "lang": "und"}
+        tlang = ts_langs[pos] if pos < len(ts_langs) else ""
+        lang = tlang or f["lang"] or "und"
+        name = SUB_LANG_NAMES.get(lang, lang)
+        ch = f["ch"]
+        if ch == 6:
+            chs = "5.1"
+        elif ch == 8:
+            chs = "7.1"
+        elif ch == 2:
+            chs = "2.0"
+        elif ch > 0:
+            chs = str(ch)
+        else:
+            chs = "?"
+        label = "#%d  %s  %s  %s" % (pos + 1, name, chs, f["codec"])
+        tracks.append((pos, label, f["codec"], ch, lang))
     return tracks
 
 
@@ -792,6 +845,12 @@ SUB_LANG_NAMES = {
     "deu": "德语", "ger": "德语", "jpn": "日语", "kor": "韩语",
     "spa": "西班牙语", "por": "葡萄牙语", "tha": "泰语", "rus": "俄语",
     "ita": "意大利语", "nld": "荷兰语", "swe": "瑞典语", "und": "未标注",
+    "ind": "印尼语", "vie": "越南语", "msa": "马来语", "hin": "印地语",
+    "ara": "阿拉伯语", "tur": "土耳其语", "pol": "波兰语", "ces": "捷克语",
+    "hun": "匈牙利语", "ell": "希腊语", "heb": "希伯来语", "dan": "丹麦语",
+    "fin": "芬兰语", "nor": "挪威语", "ukr": "乌克兰语", "ron": "罗马尼亚语",
+    "tam": "泰米尔语", "tel": "泰卢固语", "ben": "孟加拉语", "fil": "菲律宾语",
+    "en": "英语", "zh": "中文", "ja": "日语", "ko": "韩语", "cn": "中文",
 }
 
 SUB_EXTS = (".sup", ".pgs", ".srt", ".ass", ".ssa")
