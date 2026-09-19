@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 import sublang
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.15"
+APP_VERSION = "v2.9.17"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -2420,29 +2420,43 @@ class NoWheelComboBox(QComboBox):
 
 
 class NoWheelListWidget(QListWidget):
-    """字幕列表：平滑滚动（动画过渡）；滚到顶/底也不传递给整体页面"""
+    """字幕列表：圆角主题背景（自绘）、平滑滚动；滚到顶/底不穿透到整体页面"""
 
-    STEP = 90
+    STEP = 30   # 每格滚轮像素基准（约 0.9 行）
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setFrameShape(QFrame.NoFrame)              # 去掉原生边线（黑线）
+        self.setAttribute(Qt.WA_StyledBackground, True)  # 由样式表绘制圆角背景
+        vp = self.viewport()
+        vp.setAutoFillBackground(False)                  # 视口透明，圆角才可见
+        pal = vp.palette()
+        pal.setColor(QPalette.Base, QColor(0, 0, 0, 0))
+        pal.setColor(QPalette.Window, QColor(0, 0, 0, 0))
+        vp.setPalette(pal)
         self._target = 0
         self._anim = QPropertyAnimation(self.verticalScrollBar(), b"value",
                                         self)
-        self._anim.setDuration(220)
+        self._anim.setDuration(200)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
 
     def wheelEvent(self, event):
         sb = self.verticalScrollBar()
         dy = event.angleDelta().y()
+        if dy == 0:
+            event.accept()
+            return
         try:
-            if dy != 0 and sb.maximum() > sb.minimum():
+            if sb.maximum() > sb.minimum():
                 running = (self._anim.state()
                            == QAbstractAnimation.State.Running)
                 base = self._target if running else sb.value()
+                # 按滚动量比例换算：兼容高精度滚轮（一次物理滚动发出多个
+                # 小 delta 事件，逐事件按 120 基准换算，总量自然累计），
+                # 单次事件限幅 1.2 格；方向：上滚减小（看更早内容）、下滚增大
+                steps = max(-1.2, min(1.2, dy / 120.0))
                 target = max(sb.minimum(),
-                             min(base - (dy / 120.0) * self.STEP,
-                                 sb.maximum()))
+                             min(base - steps * self.STEP, sb.maximum()))
                 self._target = target
                 self._anim.stop()
                 self._anim.setStartValue(sb.value())
@@ -3372,18 +3386,22 @@ class MainWindow(QWidget):
             self.clip_slider.set_theme(self._theme)
         if getattr(self, "chk_clip", None) is not None:
             self.chk_clip.set_theme(self._theme)
-        # 字幕列表：QSS 对 QListWidget 视口背景不生效（Fusion 实测），
-        # 用 palette + 控件级滚动条样式双保险，保证深浅主题底色正确
+        # 字幕列表：控件级样式（全局 QSS 对 QListWidget 背景偶发不生效），
+        # 圆角背景 + 主题边框；配合 WA_StyledBackground + 透明视口实现圆角
         try:
             c = THEMES.get(self._theme, THEMES["dark"])
+            self.sub_list.setStyleSheet(
+                "QListWidget#sublist { background: %s; border: 1px solid %s;"
+                " border-radius: 8px; padding: 5px 4px; outline: none; }"
+                "QListWidget#sublist::item { background: transparent;"
+                " border: none; }"
+                % (c["input"], c["input_border"]))
             vp = self.sub_list.viewport()
+            vp.setAutoFillBackground(False)
             pal = vp.palette()
-            pal.setColor(QPalette.Base, QColor(c["input"]))
-            pal.setColor(QPalette.Window, QColor(c["input"]))
-            pal.setColor(QPalette.Text, QColor(c["text"]))
-            pal.setColor(QPalette.Highlight, QColor(c["input"]))
+            pal.setColor(QPalette.Base, QColor(0, 0, 0, 0))
+            pal.setColor(QPalette.Window, QColor(0, 0, 0, 0))
             vp.setPalette(pal)
-            vp.setAutoFillBackground(True)
             vp.update()
             self.sub_list.verticalScrollBar().setStyleSheet(
                 "QScrollBar:vertical { width: 8px; background: transparent;"
