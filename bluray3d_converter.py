@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 import sublang
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.22"
+APP_VERSION = "v3.0.0"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -3154,6 +3154,36 @@ class MainWindow(QWidget):
         QTimer.singleShot(0, self._startup_log)
         QTimer.singleShot(1500, self._warm_ocr)
 
+    def ensure_disclaimer(self):
+        """首次运行免责声明：同意则永久记入配置（以后不再弹），不同意返回 False（调用方退出）"""
+        if self.cfg.get("disclaimer_accepted"):
+            return True
+        text = (
+            "使用本软件前，请阅读并同意以下条款：\n\n"
+            "1. 本软件为免费开源的个人视频转码工具，仅供将您合法持有的\n"
+            "    3D 蓝光影碟转换为个人设备（如 AR 眼镜）观看的格式备份；\n"
+            "2. 请勿用于复制、传播任何未获授权的内容，由此产生的一切法\n"
+            "    律责任由使用者自行承担；\n"
+            "3. 转码耗时长且有失败可能，请务必保留原始文件；因使用本软\n"
+            "    件造成的任何数据丢失或损坏，作者不承担责任；\n"
+            "4. 软件按「现状」提供，不附带任何明示或默示担保；\n"
+            "5. 内置 FFmpeg、tsMuxeR、MKVToolNix 等组件遵循各自开源许可。\n\n"
+            "点击「同意」表示已阅读并接受全部条款（不再提示）；\n"
+            "点击「不同意」将直接退出软件。")
+        mb = make_msgbox(self, QMessageBox.Information, text,
+                         QMessageBox.Yes | QMessageBox.No,
+                         QMessageBox.Yes)
+        mb.button(QMessageBox.Yes).setText("同意")
+        mb.button(QMessageBox.No).setText("不同意（退出）")
+        accepted = mb.exec() == QMessageBox.Yes
+        if accepted:
+            self.cfg["disclaimer_accepted"] = True
+            self._save_cfg()
+            self._log("免责声明：已确认同意（以后不再提示）")
+        else:
+            self._log("免责声明：未同意，软件将退出")
+        return accepted
+
     def _warm_ocr(self):
         """后台预热 OCR 引擎（用户选文件前就绪，识别更快）"""
         def work():
@@ -3191,6 +3221,13 @@ class MainWindow(QWidget):
                     "OK" if os.path.exists(os.path.join(BIN_DIR,
                                                         "mkvmerge.exe"))
                     else "缺失"))
+            self._runlog_h.write(
+                "免责声明：本软件仅供个人合法持有内容的格式转换与备份，"
+                "请遵守当地法律，勿用于侵权用途；风险自负。\n")
+            self._runlog_h.write(
+                "免责声明状态：已同意%s\n" % (
+                    "（首次运行已确认）" if self.cfg.get("disclaimer_accepted")
+                    else "（本次启动默认记录）"))
             self._runlog_h.flush()
         except Exception:
             self._runlog_h = None
@@ -3824,7 +3861,8 @@ class MainWindow(QWidget):
                "reuse_video": self.chk_reuse.isChecked(),
                "open_after": self.chk_open.isChecked(),
                "perf": self.cfg.get("perf") if isinstance(
-                   self.cfg.get("perf"), dict) else {}}
+                   self.cfg.get("perf"), dict) else {},
+               "disclaimer_accepted": bool(self.cfg.get("disclaimer_accepted"))}
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -5166,6 +5204,8 @@ def main():
     win._theme = theme
     win._apply_theme()
     win.show()
+    if "--selftest" not in args and not win.ensure_disclaimer():
+        return 0
     if "--selftest" in args:
         _st = {"msg": "", "round": 0, "extra": ""}
 

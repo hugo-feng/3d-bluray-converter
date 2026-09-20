@@ -1,0 +1,25 @@
+{
+  "theme": "dark",
+  "left": "",
+  "right": "",
+  "out": "",
+  "layout": "全宽 SBS  3840×1080（AR 眼镜推荐）",
+  "container": "MKV（推荐，支持 DTS 原声）",
+  "encoder": "AMD AMF（A 卡 / 核显，推荐）",
+  "speed": "质量优先",
+  "rc": "恒定质量（推荐）",
+  "qp": "高画质（约 28 Mbps）",
+  "bitrate": "20",
+  "audio": "原声 + AAC 兼容轨（推荐）",
+  "gop": "96",
+  "ffver": "自动（按显卡驱动匹配）",
+  "segs": [
+    "",
+    ""
+  ],
+  "cat_out": "",
+  "encoder_touched": false,
+  "reuse_video": true,
+  "open_after": true,
+  "perf": {}
+}
