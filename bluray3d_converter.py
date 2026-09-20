@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 import sublang
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.21"
+APP_VERSION = "v2.9.22"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -2530,15 +2530,18 @@ class SubItemDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         c = THEMES.get(_ACTIVE.get("theme", "dark"), THEMES["dark"])
+        theme = _ACTIVE.get("theme", "dark")
+        enabled = bool(option.state & QStyle.State_Enabled)
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(option.rect).adjusted(4, 3, -4, -3)
         checked = bool(index.data(Qt.UserRole + 1))
-        hover = bool(option.state & QStyle.State_MouseOver)
+        hover = enabled and bool(option.state & QStyle.State_MouseOver)
         # 行背景：勾选=淡强调色胶囊；悬停=柔和高亮（均圆角）
+        # 锁定态：胶囊与勾选框整体转暗灰，表示任务进行中不可调整
         if checked:
-            bg = QColor(c["accent"])
-            bg.setAlpha(40)
+            bg = QColor(c["accent"] if enabled else c["faint"])
+            bg.setAlpha(40 if enabled else 32)
             painter.setPen(Qt.NoPen)
             painter.setBrush(bg)
             painter.drawRoundedRect(r, 8, 8)
@@ -2550,9 +2553,13 @@ class SubItemDelegate(QStyledItemDelegate):
         box = QRectF(r.left() + 10, r.center().y() - 9, 18, 18)
         if checked:
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(c["accent"]))
+            if enabled:
+                painter.setBrush(QColor(c["accent"]))
+            else:
+                painter.setBrush(QColor("#4a4d57" if theme == "dark"
+                                        else "#c9c9d0"))
             painter.drawRoundedRect(box, 5, 5)
-            pen = QPen(QColor("#ffffff"))
+            pen = QPen(QColor("#ffffff" if enabled else "#8a8f99"))
             pen.setWidthF(2.0)
             pen.setCapStyle(Qt.RoundCap)
             pen.setJoinStyle(Qt.RoundJoin)
@@ -2566,11 +2573,14 @@ class SubItemDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(c["chk_bg"]))
             painter.setPen(QPen(QColor(c["chk_border"]), 1.2))
             painter.drawRoundedRect(box, 5, 5)
-        # 文本（勾选行加粗 + 亮色；未勾选柔灰）
+        # 文本（勾选行加粗 + 亮色；未勾选柔灰；锁定态统一转灰）
         f = QFont(option.font)
         f.setBold(checked)
         painter.setFont(f)
-        painter.setPen(QColor(c["text"] if checked else c["dim"]))
+        if not enabled:
+            painter.setPen(QColor(c["faint"]))
+        else:
+            painter.setPen(QColor(c["text"] if checked else c["dim"]))
         painter.drawText(r.adjusted(40, 0, -12, 0),
                          Qt.AlignVCenter | Qt.AlignLeft,
                          index.data(Qt.DisplayRole) or "")
@@ -3039,7 +3049,8 @@ class MainWindow(QWidget):
         self.le_cat_out = QLineEdit(self.cfg.get("cat_out", ""))
         self._file_row(self.sec_cat.body_layout, "保存全片", self.le_cat_out,
                        self.pick_cat_out, "先选好保存位置，再点右侧「开始拼接」",
-                       label_width=64, label_align=Qt.AlignLeft, hint_indent=70)
+                       right_pad=30, label_width=64, label_align=Qt.AlignLeft,
+                       hint_indent=70)
         r = QHBoxLayout()
         self.btn_seg_add = QPushButton("添加分段")
         self.btn_seg_add.setFixedWidth(90)
