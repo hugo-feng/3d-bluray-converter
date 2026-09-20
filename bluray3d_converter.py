@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 import sublang
 
 APP_TITLE = "3D 蓝光转换器"
-APP_VERSION = "v2.9.20"
+APP_VERSION = "v2.9.21"
 
 # ---- 选项定义 ----
 LAYOUTS = [
@@ -94,7 +94,9 @@ NVENC_PRESET = {"quality": "p7", "balanced": "p5", "speed": "p3"}
 QSV_PRESET = {"quality": "slow", "balanced": "medium", "speed": "veryfast"}
 
 # 输出大小预估：3840×1080 基准码率（按 CQP 档），其他分辨率/帧率按比例缩放
-BASE_MBPS = {18: 28.0, 20: 21.0, 22: 15.0, 24: 10.0}
+# 数值按实测校准：4K 全宽 SBS（AMF，CQP 18）实测约 10~12 Mbps，
+# 各档按比例外推并留约 20% 裕量（动作片等高复杂度画面体积偏大）
+BASE_MBPS = {18: 13.0, 20: 9.8, 22: 7.0, 24: 4.6}
 LAYOUT_PIXELS = {"full_sbs": (3840, 1080), "half_sbs": (1920, 1080),
                  "full_tab": (1920, 2160), "half_tab": (1920, 1080)}
 
@@ -409,7 +411,7 @@ THEMES = {
         bg="#17181c", card="#202127", border="#2e3038", text="#e8e9ed",
         dim="#9a9ca8", faint="#6b6d78", input="#2a2c34", input_border="#2e3038",
         accent="#3574f0", accent_h="#2b5fd0", btn="#33363e", btn_h="#3d4149",
-        disabled_bg="#24262c",
+        disabled_bg="#24262c", disabled_fg="#7b8089",
         danger="#c62828", danger_h="#d33b3b", danger_p="#a51f1f",
         hover="#26272e", chk_border="#3d4149",
         scroll_bg="#17181c", scroll_handle="#3d4149", scroll_handle_h="#5a5e69",
@@ -421,7 +423,7 @@ THEMES = {
         bg="#f3f3f3", card="#ffffff", border="#e4e4e4", text="#1b1b1b",
         dim="#5f6368", faint="#8a8d93", input="#ffffff", input_border="#d6d6d6",
         accent="#3574f0", accent_h="#2b5fd0", btn="#f5f5f5", btn_h="#ebebeb",
-        disabled_bg="#eeeeee",
+        disabled_bg="#eeeeee", disabled_fg="#9aa0aa",
         danger="#c62828", danger_h="#d33b3b", danger_p="#a51f1f",
         hover="#ededed", chk_border="#c0c0c0",
         scroll_bg="#ffffff", scroll_handle="#c9c9cf", scroll_handle_h="#a6a6ae",
@@ -484,6 +486,13 @@ QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px;
 QCheckBox::indicator:checked { background: @ACCENT@; border-color: @ACCENT@;
                                image: url("@ICONS@/check.svg"); }
 QCheckBox::indicator:hover { border-color: @ACCENT@; }
+QCheckBox:disabled { color: @FAINT@; }
+QCheckBox::indicator:disabled { border: 1px solid @CHK_BORDER@;
+                                background: @DISABLED_BG@; }
+QCheckBox::indicator:checked:disabled { background: @DISABLED_BG@;
+                                border-color: @CHK_BORDER@;
+                                image: url("@ICONS@/check-dim.svg"); }
+QCheckBox::indicator:hover:disabled { border-color: @CHK_BORDER@; }
 QLabel#oklabel { color: @OK@; background: @OK_BG@; border-radius: 9px;
                  padding: 3px 12px; font-weight: 600; }
 QLabel#warnlabel { color: @WARN@; background: @WARN_BG@; border-radius: 9px;
@@ -1655,6 +1664,11 @@ class ConvertJob(threading.Thread):
             if p.returncode != 0:
                 raise RuntimeError("视频编码失败（ffmpeg 返回码 %s）" % p.returncode)
             self.stats["encode"] = time.time() - t_enc
+            try:
+                self.stats["enc_fps"] = total / max(self.stats["encode"], 0.1)
+                self.stats["enc_key"] = "%s|%s" % (self.encoder, self.speed)
+            except Exception:
+                pass
 
 
         # ---- 阶段 2B：提取音频到独立文件（顺序 I/O）----
@@ -2177,10 +2191,19 @@ class RangeSlider(QWidget):
     # ---- 绘制 ----
     def paintEvent(self, _event):
         c = THEMES.get(self._theme, THEMES["dark"])
+        en = self.isEnabled()
         if self._theme == "light":
             groove, edge = "#e6e6ea", "#d0d0d6"
         else:
             groove, edge = "#26272e", "#3a3c44"
+        if en:
+            accent = c["accent"]
+        else:
+            # 锁定态：整条滑块与被拖动的手柄都改为暗灰，表示参数已锁定
+            if self._theme == "light":
+                accent = "#c9c9d0"
+            else:
+                accent = "#4a4d57"
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         h = 8.0
@@ -2193,15 +2216,18 @@ class RangeSlider(QWidget):
         p.drawRoundedRect(QRectF(x0, y, x1 - x0, h), r, r)
         if xb - xa > 0.6:
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(c["accent"]))
+            p.setBrush(QColor(accent))
             p.drawRoundedRect(QRectF(xa, y, max(xb - xa, h), h), r, r)
         for x, key in ((xa, "lo"), (xb, "hi")):
-            active = (self._drag == key) or (self._hover == key)
+            active = en and ((self._drag == key) or (self._hover == key))
             rad = 7.0 if not active else 8.0
             cy = self.height() / 2.0
-            p.setPen(QPen(QColor("#ffffff" if self._theme == "dark"
-                                 else "#ffffff"), 2))
-            p.setBrush(QColor(c["accent"]))
+            if en:
+                p.setPen(QPen(QColor("#ffffff"), 2))
+            else:
+                p.setPen(QPen(QColor("#3f434c" if self._theme == "dark"
+                                     else "#b9b9c2"), 2))
+            p.setBrush(QColor(accent))
             p.drawEllipse(QRectF(x - rad, cy - rad, rad * 2, rad * 2))
 
     # ---- 交互 ----
@@ -2316,7 +2342,11 @@ class ToggleSwitch(QWidget):
         cx = 3.0 + kr + (w - 6.0 - kr * 2.0) * self._pos
         cy = h / 2.0
         p.setPen(QPen(QColor(0, 0, 0, 50), 1))
-        p.setBrush(QColor("#ffffff"))
+        if self.isEnabled():
+            p.setBrush(QColor("#ffffff"))
+        else:
+            # 锁定态：旋钮变暗灰，与滑道一起表示不可操作
+            p.setBrush(QColor("#9aa0aa" if self._theme == "dark" else "#c9c9d0"))
         p.drawEllipse(QRectF(cx - kr, cy - kr, kr * 2, kr * 2))
 
 
@@ -3009,7 +3039,7 @@ class MainWindow(QWidget):
         self.le_cat_out = QLineEdit(self.cfg.get("cat_out", ""))
         self._file_row(self.sec_cat.body_layout, "保存全片", self.le_cat_out,
                        self.pick_cat_out, "先选好保存位置，再点右侧「开始拼接」",
-                       right_pad=30)
+                       label_width=64, label_align=Qt.AlignLeft, hint_indent=70)
         r = QHBoxLayout()
         self.btn_seg_add = QPushButton("添加分段")
         self.btn_seg_add.setFixedWidth(90)
@@ -3183,11 +3213,12 @@ class MainWindow(QWidget):
         if i >= 0:
             cb.setCurrentIndex(i)
 
-    def _file_row(self, parent, label, le, browse_cmd, hint="", right_pad=0):
+    def _file_row(self, parent, label, le, browse_cmd, hint="", right_pad=0,
+                  label_width=88, label_align=Qt.AlignRight, hint_indent=96):
         row = QHBoxLayout()
         lb = QLabel(label)
-        lb.setFixedWidth(88)
-        lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lb.setFixedWidth(label_width)
+        lb.setAlignment(label_align | Qt.AlignVCenter)
         row.addWidget(lb)
         row.addWidget(le, 1)
         b = QPushButton("浏览")
@@ -3202,7 +3233,7 @@ class MainWindow(QWidget):
         parent.addLayout(row)
         h = QLabel(hint)
         h.setObjectName("faintlabel")
-        h.setContentsMargins(96, 0, 0, 4)
+        h.setContentsMargins(hint_indent, 0, 0, 4)
         parent.addWidget(h)
         return h
 
@@ -3488,8 +3519,16 @@ class MainWindow(QWidget):
             "QCheckBox::indicator:checked { background: %(accent)s;"
             " border-color: %(accent)s; image: url(\"%(icon)s\"); }"
             "QCheckBox::indicator:hover { border-color: %(accent)s; }"
+            "QCheckBox:disabled { color: %(faint)s; }"
+            "QCheckBox::indicator:disabled { border: 1px solid %(border)s;"
+            " background: %(dbg)s; }"
+            "QCheckBox::indicator:checked:disabled { background: %(dbg)s;"
+            " border-color: %(border)s; image: url(\"%(icon_dim)s\"); }"
+            "QCheckBox::indicator:hover:disabled { border-color: %(border)s; }"
             % {"dim": c["dim"], "border": c["chk_border"], "bg": c["chk_bg"],
-               "accent": c["accent"], "icon": ICONS_DIR.replace("\\", "/") + "/check.svg"}
+               "accent": c["accent"], "faint": c["faint"], "dbg": c["disabled_bg"],
+               "icon": ICONS_DIR.replace("\\", "/") + "/check.svg",
+               "icon_dim": ICONS_DIR.replace("\\", "/") + "/check-dim.svg"}
         )
         for ck in (getattr(self, "chk_open", None), getattr(self, "chk_reuse", None)):
             if ck is not None:
@@ -3772,7 +3811,9 @@ class MainWindow(QWidget):
                "cat_out": self.le_cat_out.text(),
                "encoder_touched": bool(self._encoder_touched or self._enc_user_fixed),
                "reuse_video": self.chk_reuse.isChecked(),
-               "open_after": self.chk_open.isChecked()}
+               "open_after": self.chk_open.isChecked(),
+               "perf": self.cfg.get("perf") if isinstance(
+                   self.cfg.get("perf"), dict) else {}}
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -4297,6 +4338,19 @@ class MainWindow(QWidget):
         self.lbl_stage.setText("完成")
         self._progress("done", 100.0, "输出：" + out)
         st = stats or {}
+        try:
+            k = st.get("enc_key")
+            f = float(st.get("enc_fps") or 0)
+            if k and f > 0.5:
+                perf = self.cfg.get("perf")
+                if not isinstance(perf, dict):
+                    perf = {}
+                perf[k] = round(f, 1)
+                self.cfg["perf"] = perf
+                self._save_cfg()
+                self._log("已记录本机实测编码速度：%s ≈ %.1f 帧/秒（下次开始前的预估会更准）" % (k, f))
+        except Exception:
+            pass
         lines = ["转换完成！", "", out, "", "各阶段耗时："]
         lines.append("  解流：%s" % fmt_time(st.get("demux")))
         lines.append("  编码：%s%s" % (
@@ -4400,7 +4454,16 @@ class MainWindow(QWidget):
         return True
 
     def _estimate_stage_times(self):
-        """粗估各阶段耗时（秒）→ [(阶段名, 秒), ...]（按本机经验速度，仅供确认弹窗参考）
+        """粗估各阶段耗时（秒）→ [(阶段名, 秒), ...]（仅供开始前确认弹窗参考）
+
+        基于本机实测校准的估算模型：
+          · 解流 ≈ 800 MB/s（SSD 顺序读写）
+          · 编码帧率：优先取本机历史实测（config.perf，键「编码器|速度档」，
+            任务成功完成后自动记录），无历史时用保守默认；
+            并受 AviSynth 解码上限约束（实测约 75 fps）
+          · 音频 + 字幕提取：源读取约 40 倍速，另每条字幕约 60 秒
+            （PGS 提取 + 双眼 SBS 转换）
+          · 混流：含 PGS 字幕时写入慢（实测约 16 MB/s），无字幕时约 150 MB/s
 
         不在此处同步探测时长（避免 UI 阻塞）；源时长尚未探测完成时，
         编码/音频/混流阶段暂不计入，实际执行不受影响。
@@ -4413,23 +4476,44 @@ class MainWindow(QWidget):
         enc = self._sel(ENCODERS, self.cmb_encoder.currentText(), "amf")
         speed = self._sel(SPEEDS, self.cmb_speed.currentText(), "quality")
         audio_mode = self._sel(AUDIO_MODES, self.cmb_audio.currentText(), "dual")
-        enc_fps = {"amf": 32.0, "nvenc": 32.0, "qsv": 12.0, "cpu": 2.5}.get(enc, 30.0)
-        enc_fps *= {"quality": 1.0, "balanced": 1.5, "speed": 2.2}.get(speed, 1.0)
         reuse = (getattr(self, "chk_reuse", None) is not None
                  and self.chk_reuse.isChecked())
         stages = []
         if src_bytes > 0:
             stages.append(("解流（分离左右眼视频流，片段模式只解出所选区间）",
-                           src_bytes * ratio / (250.0 * 1024 ** 2)))
+                           src_bytes * ratio / (800.0 * 1024 ** 2)))
         if dur > 0:
             nm = "编码（合并 SBS 并重新编码）"
             if reuse:
                 nm = "编码（勾选了复用：已有编码结果则跳过）"
+            perf = self.cfg.get("perf")
+            hist = None
+            if isinstance(perf, dict):
+                try:
+                    hist = float(perf.get("%s|%s" % (enc, speed)) or 0) or None
+                except (TypeError, ValueError):
+                    hist = None
+            if hist:
+                enc_fps = hist
+            else:
+                enc_fps = {"amf": 60.0, "nvenc": 60.0,
+                           "qsv": 20.0, "cpu": 4.0}.get(enc, 40.0)
+                enc_fps *= {"quality": 1.0, "balanced": 1.5,
+                            "speed": 2.2}.get(speed, 1.0)
+            enc_fps = min(enc_fps, 75.0)
             stages.append((nm, dur * fps / max(enc_fps, 0.1)))
         if dur > 0 and audio_mode != "none":
-            stages.append(("提取音频", dur / 12.0))
-            stages.append(("混流封装",
-                           max(self._estimated_output_mb(), 100.0) / 120.0))
+            n_sub = len(self._checked_subs()) if getattr(
+                self, "subtitle_tracks", None) else 0
+            stages.append(("提取音频（含 %d 条字幕）" % n_sub if n_sub
+                           else "提取音频", dur / 40.0 + 60.0 * n_sub))
+            if n_sub:
+                # 含 PGS 字幕时混流瓶颈在字幕数据与时间戳交错写入，
+                # 与成品体积关系弱，实测约 0.10 × 视频时长
+                mux_s = dur * 0.10
+            else:
+                mux_s = max(self._estimated_output_mb(), 100.0) / 150.0
+            stages.append(("混流封装", mux_s))
         return stages
 
     def _confirm_start(self, left, right, out):
@@ -4460,9 +4544,13 @@ class MainWindow(QWidget):
             total += sec
             lines.append("  %d/%d  %s" % (i, len(stages), nm))
             lines.append("        预计约 %s" % fmt_time(sec))
+        hist_any = isinstance(self.cfg.get("perf"), dict) and any(
+            isinstance(v, (int, float)) for v in self.cfg.get("perf").values())
         lines += ["",
-                  "合计预计：约 %s（按本机配置粗估，实际用时可能有差异）"
-                  % fmt_time(total),
+                  "合计预计：约 %s（%s）" % (
+                      fmt_time(total),
+                      "按本机历史实测速度估算" if hist_any
+                      else "按通用经验值粗估，完成一次任务后自动校准"),
                   "",
                   "是否开始？"]
         if self._src_dur <= 0:
